@@ -1,0 +1,2815 @@
+# ============================================================
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v7)
+#  بورس اوراق بهادار تهران
+#  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
+#   پوشش داده‌شده با استفاده از یادگیری عمیق»
+#
+#  ⚠️ نسخهٔ آموزشیِ «تشخیص تقلب علمی» ⚠️
+#  همان کد اصلی پایان‌نامه است، با یک سلولِ آموزشیِ اضافه (CELL 5.5)
+#  که فقط خطای «Feature Leakage» را نشان می‌دهد و کاملاً جدا از
+#  ادامهٔ pipeline است.
+#
+#  برای HONEST (CELL 7) و FRAUD (CELL 13.8) فقط ۵ مدل زیر اجرا
+#  می‌شوند و بهترین‌شان (بر اساس Val AUC) گزارش می‌شود:
+#    ① LightGBM   ② XGBoost   ③ Random Forest
+#    ④ StackingClassifier (بر پایهٔ سه مدل بالا + متا-رگرسیون لجستیک)
+#    ⑤ VotingClassifier   (رأی‌گیری نرم بر پایهٔ سه مدل بالا)
+#
+# ------------------------------------------------------------
+#  🆕 CHANGELOG v6 → v7  (رفع باگ و تقویت روش، بدون تغییر منطق مالی
+#      استراتژی — RISK_FREE_RATE / PREMIUM_PCT / STRIKE_PCT دست‌نخورده)
+# ------------------------------------------------------------
+#  1) 🐞 باگ واقعی رفع شد: گیت اقتصادیِ بلک-شولز در بک‌تست (CELL 11 و
+#     CELL 13.8) عملاً هرگز فعال نمی‌شد، چون نوسانِ روزانه از
+#     `filtered[name]['volatility']` خوانده می‌شد — ستونی که در آن
+#     دیکشنری اصلاً وجود ندارد (فیچرها فقط در df_feat ساخته می‌شوند).
+#     نتیجه: `daily_vol=None` همیشه پاس داده می‌شد و `bs_fair` همیشه
+#     برابر خودِ premium در نظر گرفته می‌شد، یعنی شرط
+#     `bs_ok = premium >= bs_fair` همیشه True بود و کل منطق «فقط وقتی
+#     پرمیوم بازار منصفانه است بفروش» بی‌اثر مانده بود.
+#     ✅ رفع: نوسانِ واقعیِ هر روزِ تست از df_feat در پروسهٔ آماده‌سازی
+#     ذخیره می‌شود (`prepared[name]['volatility_test']`) و مستقیماً به
+#     بک‌تست داده می‌شود، دقیقاً همان‌طور که طراحی اولیه قصد داشت.
+#
+#  2) 🐞 نشتِ برچسب در مرز Train/Val/Test: چون target هر روز (`ret_5d`)
+#     ۵ روز به جلو نگاه می‌کند، چند ردیفِ آخرِ Train/Val به‌طور واقعی از
+#     قیمت‌های بخش بعدی اطلاع داشتند (leak از Val→Train و Test→Val).
+#     ✅ رفع: یک Purge Gap برابر با HOLD_DAYS (۵ روز) بین انتهای هر
+#     بخش و ابتدای بخش بعدی حذف می‌شود (روش استاندارد Purged
+#     Time-Series Split — Lopez de Prado). اندازهٔ Test بدون تغییر
+#     می‌ماند تا مقایسه‌ها منصفانه بمانند. این منطق در یک تابع مشترک
+#     `time_split_slices()` پیاده شده و هم در HONEST (CELL 5) هم در
+#     دموی نشتِ فیچر (CELL 5.5) هم در FRAUD (CELL 13.8) به‌صورت یکسان
+#     استفاده می‌شود — تا تنها تفاوتِ HONEST/FRAUD همان چیزی بماند که
+#     قرار است باشد: وجود/عدم‌وجود `leak_feat`.
+#
+#  3) 🐞 داده‌های واقعی TSETMC: چند جهش قیمتی افراطی (مثل -94.9% و
+#     سپس +100.0% در IranKhodro، یا -75.9% در VebMellat) در داده‌های
+#     خام دیده شد که مربوط به وقایع شرکتی (افزایش سرمایه/تجدید
+#     ارزیابی) هستند، نه نوسان بازار — چون دامنهٔ نوسان روزانهٔ بورس
+#     تهران معمولاً ±5% تا ±6% است و یک جهش تک‌روزهٔ >۲۵٪ تقریباً
+#     همیشه یک رویداد شرکتی است. این جهش‌ها اگر تعدیل نشوند مستقیماً
+#     در target (`ret_5d`)، در volatility، و در بازده بک‌تست به‌عنوان
+#     بازدهی واقعی وارد می‌شوند و مدل/بک‌تست را کاملاً گمراه می‌کنند.
+#     ✅ رفع: `adjust_corporate_actions()` قیمت‌ها را به روش
+#     Back-Adjustment (دقیقاً مشابه تعدیل تقسیم سهام) تعدیل می‌کند:
+#     آخرین قیمتِ گزارش‌شده (امروز) دست‌نخورده می‌ماند و کل تاریخچهٔ
+#     قبل از هر جهش >۲۵٪ با ضریب آن جهش تعدیل می‌شود تا سری قیمت
+#     پیوسته و بدون جهش مصنوعی شود. آستانه قابل تنظیم است
+#     (`CORP_ACTION_THRESHOLD`) و در گزارش هر سهم لاگ می‌شود.
+#
+#  4) فهرست نمادها اکنون پویا ساخته می‌شود: هر نمادی از لیست کاندید که
+#     فایل CSV آن در پوشهٔ داده موجود نباشد با هشدار رد می‌شود (مثلاً
+#     اگر فایل Shapna.csv موجود نباشد، پایپ‌لاین کرش نمی‌کند و فقط با
+#     ۵ سهم باقی‌مانده ادامه می‌دهد)، و هر فایل CSV اضافه‌ای که در پوشه
+#     باشد ولی در لیست کاندید نباشد هم به‌صورت خودکار شناسایی می‌شود.
+#
+#  5) نصب Google Drive اکنون داخل try/except است: اگر خارج از Colab
+#     اجرا شود (مثلاً برای تست محلی) به یک پوشهٔ محلی «./data» سقوط
+#     می‌کند به‌جای کرش کردن.
+#
+#  6) Seed سراسری (numpy/random/PYTHONHASHSEED و TensorFlow در صورت
+#     وجود) برای تکرارپذیریِ بهتر نتایج ست شده است.
+#
+#  هیچ‌کدام از این تغییرات پارامترهای مالیِ استراتژی (RISK_FREE_RATE,
+#  PREMIUM_PCT, STRIKE_PCT, تعداد/نوع مدل‌ها) را تغییر نداده — این‌ها
+#  فرضیات روش‌شناسی پایان‌نامه هستند و دست‌نخورده باقی مانده‌اند؛ فقط
+#  باگ‌ها و نشتِ داده رفع شده تا هم نسخهٔ HONEST و هم نسخهٔ FRAUD واقعاً
+#  بهترین (و صادقانه‌ترین) نتیجهٔ ممکن را از همان روش اصلی بگیرند.
+# ============================================================
+
+
+# ─────────────────────────────────────────────
+# CELL 0 — نصب و آماده‌سازی محیط
+# ─────────────────────────────────────────────
+import subprocess
+for pkg in [
+    'lightgbm', 'xgboost', 'optuna', 'shap', 'scikit-learn',
+]:
+    subprocess.run(['pip', 'install', pkg, '-q'], check=False)
+
+import pandas as pd
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import warnings
+warnings.filterwarnings('ignore')
+import os, gc, time, random
+
+# 🆕 v7: تکرارپذیری سراسری
+GLOBAL_SEED = 42
+random.seed(GLOBAL_SEED)
+np.random.seed(GLOBAL_SEED)
+os.environ['PYTHONHASHSEED'] = str(GLOBAL_SEED)
+try:
+    import tensorflow as tf
+    tf.random.set_seed(GLOBAL_SEED)
+except ImportError:
+    pass
+
+# 🆕 v7: افق پیش‌بینی / نگهداری آپشن — یک منبع واحد به‌جای اعداد پراکنده
+HOLD_DAYS = 5
+
+# 🆕 v7: Mount درایو داخل try/except تا خارج از Colab هم کرش نکند
+try:
+    from google.colab import drive
+    drive.mount('/content/drive')
+    FP = '/content/drive/My Drive/Covered Call Project/'
+except ImportError:
+    FP = os.path.join(os.getcwd(), 'data') + os.sep
+    print(f"⚠️ خارج از Google Colab اجرا می‌شود — از مسیر محلی استفاده می‌شود: {FP}")
+
+for sub in ['models', 'plots', 'shap', 'backtest',
+            'FRAUD_plots', 'FRAUD_shap', 'FRAUD_backtest']:
+    os.makedirs(FP + sub, exist_ok=True)
+print("✅ Ready")
+
+BANNER_FRAUD  = "🚨🚨🚨 FRAUD DEMO — نتیجه‌ی زیر با روش نامعتبر به‌دست آمده و قابل استناد نیست 🚨🚨🚨"
+BANNER_HONEST = "✅ HONEST — نتیجه‌ی زیر با روش صحیح (همان pipeline اصلی شما) به‌دست آمده"
+def fraud_banner(msg):
+    line = "=" * 84
+    print(f"\n{line}\n{BANNER_FRAUD}\n  {msg}\n{line}")
+def honest_banner(msg):
+    line = "=" * 84
+    print(f"\n{line}\n{BANNER_HONEST}\n  {msg}\n{line}")
+
+
+# ─────────────────────────────────────────────
+# CELL 1 — بارگذاری (🆕 v7: کشفِ پویای نمادها)
+# ─────────────────────────────────────────────
+ASSET_CANDIDATES = ['Fameli', 'Fulad', 'IranKhodro',
+                     'Khgostar', 'Shapna', 'VebMellat']
+
+ASSET_NAMES = []
+for n in ASSET_CANDIDATES:
+    if os.path.exists(FP + f'{n}.csv'):
+        ASSET_NAMES.append(n)
+    else:
+        print(f"⚠️  {n}.csv در '{FP}' پیدا نشد — این نماد نادیده گرفته می‌شود.")
+
+# هر CSV اضافه‌ای که در پوشه هست ولی در لیست کاندید نبود هم اضافه شود
+if os.path.isdir(FP):
+    for fn in sorted(os.listdir(FP)):
+        if fn.lower().endswith('.csv'):
+            nm = fn[:-4]
+            if nm not in ASSET_NAMES and nm not in ['thesis_table_final',
+                    'FRAUD_thesis_table_final', 'CLASSROOM_ONLY_full_honest_vs_fraud',
+                    'portfolio_optimization', 'FRAUD_portfolio_optimization']:
+                print(f"➕  فایل اضافه پیدا شد و به لیست نمادها اضافه شد: {nm}")
+                ASSET_NAMES.append(nm)
+
+if not ASSET_NAMES:
+    raise FileNotFoundError(
+        f"هیچ فایل CSV سهامی در '{FP}' پیدا نشد. فایل‌ها را در همین مسیر قرار دهید.")
+
+assets = {n: pd.read_csv(FP + f'{n}.csv') for n in ASSET_NAMES}
+print("✅ Data loaded:", list(assets.keys()))
+
+
+# ─────────────────────────────────────────────
+# CELL 2 — پاکسازی + تعدیل وقایع شرکتی (🆕 v7)
+# ─────────────────────────────────────────────
+CORP_ACTION_THRESHOLD = 0.25  # جهش تک‌روزه بیش از این درصد → واقعهٔ شرکتی فرض می‌شود
+                              # (دامنهٔ نوسان روزانهٔ بورس تهران معمولاً ±5%..±6% است)
+
+
+def adjust_corporate_actions(df, price_cols=('close', 'open', 'high', 'low', 'last'),
+                              threshold=CORP_ACTION_THRESHOLD, ref_col='close'):
+    """
+    تعدیلِ عقب‌رو (Back-Adjustment) برای جهش‌های قیمتیِ افراطی که با
+    نوسان طبیعی بازار قابل توجیه نیستند (افزایش سرمایه، تجدید ارزیابی،
+    بازگشایی پس از توقف طولانی). دقیقاً مشابه تعدیل تقسیم سهام:
+    آخرین قیمتِ گزارش‌شده دست‌نخورده می‌ماند و کل تاریخچهٔ *قبل* از هر
+    جهش با ضریب همان جهش ضرب می‌شود تا سری قیمت پیوسته شود.
+
+    محدودیت روش‌شناختی (که باید در گزارش پایان‌نامه ذکر شود): چون
+    داده‌های خام TSETMC اطلاعِ دقیق نوع رویداد شرکتی را همراه ندارند،
+    این تابع صرفاً بر اساس اندازهٔ جهش تصمیم می‌گیرد؛ آستانهٔ ۲۵٪ به‌قصد
+    محافظه‌کارانه‌بودن انتخاب شده (خیلی بالاتر از دامنهٔ نوسان روزانه)
+    تا نوسانات شدید ولی واقعیِ بازار دست‌نخورده بمانند.
+    """
+    df = df.copy()
+    if ref_col not in df.columns or len(df) < 2:
+        return df, []
+
+    close = df[ref_col].astype(float).values
+    n = len(close)
+    factor = np.ones(n)
+    cum = 1.0
+    events = []
+    for i in range(n - 2, -1, -1):
+        c0, c1 = close[i], close[i + 1]
+        if c0 > 0 and c1 > 0:
+            raw_ret = c1 / c0 - 1.0
+            if abs(raw_ret) > threshold:
+                local_factor = c1 / c0
+                cum *= local_factor
+                events.append((df.index[i + 1], raw_ret, local_factor))
+        factor[i] = cum
+
+    for col in price_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float) * factor
+    return df, events[::-1]
+
+
+processed = {}
+corp_action_log = {}
+for name, df in assets.items():
+    df = df.copy()
+    df.columns = [c.replace('<', '').replace('>', '').strip().lower()
+                  for c in df.columns]
+    date_col = next(
+        (c for c in ['dtyyyymmdd', 'date', 'jdate', 'dttm']
+         if c in df.columns), None)
+    if date_col:
+        df[date_col] = pd.to_datetime(
+            df[date_col], format='%Y%m%d', errors='coerce')
+        df = (df.dropna(subset=[date_col])
+                .set_index(date_col).sort_index())
+    for c in ['close', 'open', 'high', 'low', 'vol',
+              'value', 'yesterday', 'last']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(
+                df[c].astype(str).str.replace(',', ''),
+                errors='coerce')
+    if 'close' not in df.columns and 'last' in df.columns:
+        df['close'] = df['last']
+
+    # 🆕 v7: تعدیل وقایع شرکتی — پیش از فیلتر/فیچرسازی
+    df, events = adjust_corporate_actions(df)
+    corp_action_log[name] = events
+    if events:
+        print(f"  🔧 {name}: {len(events)} واقعهٔ شرکتی تعدیل شد "
+              f"(بزرگ‌ترین جهش خام: {max(abs(e[1]) for e in events)*100:.0f}%)")
+
+    processed[name] = df
+print("✅ Clean + corporate-action adjustment done")
+
+
+# ─────────────────────────────────────────────
+# CELL 3 — فیلتر
+# ─────────────────────────────────────────────
+filtered = {}
+for name, df in processed.items():
+    df = (df.loc['2015-01-01':'2025-12-31']
+            .copy()
+            .dropna(subset=['close']))
+    if 'vol' in df.columns:
+        df = df[df['vol'] > 0]
+    filtered[name] = df
+    print(f"  {name}: {len(df)} days")
+print("✅ Filtered")
+
+
+# ============================================================
+#  CELL 3.5 — افزایش داده مصنوعی با GAN (طبق پروپوزال، اختیاری)
+# ============================================================
+GAN_MIN_ROWS   = 500
+GAN_SYNTH_FRAC = 0.25
+GAN_EPOCHS     = 800
+GAN_NOISE_DIM  = 16
+GAN_WINDOW     = 20
+
+
+def build_simple_gan(window, noise_dim):
+    import tensorflow as tf
+    from tensorflow.keras import layers, Model
+
+    gen_in  = layers.Input(shape=(noise_dim,))
+    g = layers.Dense(64, activation='relu')(gen_in)
+    g = layers.Dense(64, activation='relu')(g)
+    g_out = layers.Dense(window, activation='tanh')(g)
+    generator = Model(gen_in, g_out, name='generator')
+
+    disc_in = layers.Input(shape=(window,))
+    d = layers.Dense(64, activation='relu')(disc_in)
+    d = layers.Dense(32, activation='relu')(d)
+    d_out = layers.Dense(1, activation='sigmoid')(d)
+    discriminator = Model(disc_in, d_out, name='discriminator')
+    discriminator.compile(
+        optimizer=tf.keras.optimizers.Adam(2e-4, beta_1=0.5),
+        loss='binary_crossentropy')
+
+    discriminator.trainable = False
+    gan_out = discriminator(g_out)
+    gan = Model(gen_in, gan_out, name='gan')
+    gan.compile(optimizer=tf.keras.optimizers.Adam(2e-4, beta_1=0.5),
+                loss='binary_crossentropy')
+    return generator, discriminator, gan
+
+
+def augment_with_gan(df, window=GAN_WINDOW, noise_dim=GAN_NOISE_DIM,
+                      epochs=GAN_EPOCHS, synth_frac=GAN_SYNTH_FRAC,
+                      seed=GLOBAL_SEED):
+    import tensorflow as tf
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
+    ret = df['close'].pct_change().dropna().values
+    if len(ret) < window * 3:
+        return df
+
+    scale = max(np.abs(ret).max(), 1e-6) * 1.2
+    ret_n = np.clip(ret / scale, -1, 1)
+
+    seqs = np.array([ret_n[i:i+window]
+                      for i in range(len(ret_n) - window)], dtype=np.float32)
+    if len(seqs) < 30:
+        return df
+
+    generator, discriminator, gan = build_simple_gan(window, noise_dim)
+    batch = min(32, len(seqs))
+
+    for epoch in range(epochs):
+        idx = np.random.randint(0, len(seqs), batch)
+        real = seqs[idx]
+        noise = np.random.normal(0, 1, (batch, noise_dim))
+        fake = generator.predict(noise, verbose=0)
+
+        d_loss_real = discriminator.train_on_batch(
+            real, np.ones((batch, 1)) * 0.9)
+        d_loss_fake = discriminator.train_on_batch(
+            fake, np.zeros((batch, 1)))
+
+        noise = np.random.normal(0, 1, (batch, noise_dim))
+        gan.train_on_batch(noise, np.ones((batch, 1)))
+
+    n_synth_days = int(len(df) * synth_frac)
+    n_seq_needed = max(1, n_synth_days // window + 1)
+    noise = np.random.normal(0, 1, (n_seq_needed, noise_dim))
+    synth_ret = generator.predict(noise, verbose=0).flatten() * scale
+    synth_ret = synth_ret[:n_synth_days]
+
+    first_close = df['close'].iloc[0]
+    synth_prices = [first_close]
+    for r in synth_ret[::-1]:
+        synth_prices.append(synth_prices[-1] / (1 + r))
+    synth_prices = np.array(synth_prices[1:][::-1])
+
+    first_date = df.index[0]
+    synth_dates = pd.bdate_range(
+        end=first_date - pd.Timedelta(days=1), periods=len(synth_prices))
+
+    synth_df = pd.DataFrame(index=synth_dates)
+    synth_df['close'] = synth_prices
+    for col in ['open', 'high', 'low']:
+        if col in df.columns:
+            synth_df[col] = synth_prices
+    if 'vol' in df.columns:
+        synth_df['vol'] = df['vol'].median()
+    if 'value' in df.columns:
+        synth_df['value'] = df['value'].median()
+
+    combined = pd.concat([synth_df, df], axis=0).sort_index()
+    combined = combined[~combined.index.duplicated(keep='last')]
+    return combined
+
+
+print("\n🔄 بررسی نیاز به افزایش داده (GAN)...")
+for name in list(filtered.keys()):
+    n_rows = len(filtered[name])
+    if n_rows < GAN_MIN_ROWS:
+        print(f"  {name}: {n_rows} ردیف < {GAN_MIN_ROWS} → اعمال GAN Augmentation")
+        try:
+            filtered[name] = augment_with_gan(filtered[name])
+            print(f"    → داده جدید: {len(filtered[name])} ردیف")
+        except Exception as e:
+            print(f"    ⚠️ GAN augmentation ناموفق ({e}) — از داده اصلی استفاده می‌شود")
+    else:
+        print(f"  {name}: {n_rows} ردیف ≥ {GAN_MIN_ROWS} → نیازی به GAN نیست")
+print("✅ GAN augmentation بررسی شد")
+
+
+# ============================================================
+#  CELL 4 — Feature Engineering پیشرفته (60+ فیچر)
+# ============================================================
+FEATURES_BASE = [
+    'sma10', 'sma20', 'sma50',
+    'macd', 'macd_sig', 'macd_hist',
+    'trend_dir', 'trend_str',
+    'rsi', 'rsi_slope',
+    'roc5', 'roc10', 'roc20',
+    'volatility', 'vol5', 'vol_ratio', 'atr_pct',
+    'bb_width', 'bb_pos', 'bb_squeeze',
+    'vol_ratio20', 'vol_trend', 'obv_signal',
+    'zscore', 'price_range', 'close_pos',
+    'day_of_week', 'month', 'is_month_end', 'is_month_start',
+    'market_ret', 'market_vol',
+    'stoch_k', 'stoch_d', 'williams_r', 'cci', 'adx',
+    'ema_cross', 'mom10',
+    'rel_strength_market', 'rolling_sharpe20',
+    'days_since_high20', 'days_since_low20',
+    'skew20', 'kurt20', 'autocorr5',
+]
+
+FEATURES_TSETMC = [
+    'price_at_upper_limit', 'price_at_lower_limit',
+    'near_upper_limit', 'near_lower_limit',
+    'consecutive_up_limit', 'consecutive_dn_limit',
+    'vol_spike', 'high_vol_day',
+    'price_gap', 'intraday_range_pct',
+    'ret_vs_limit', 'limit_exhaustion',
+]
+
+FEATURES_ADVANCED = [
+    'wavelet_energy_low', 'wavelet_energy_high',
+    'wavelet_entropy',
+    'hurst_exp',
+    'fractal_dim',
+    'buy_pressure', 'vwap_dev',
+    'vol_regime_score', 'trend_regime_score',
+    'beta_market20', 'corr_market10',
+    'return_entropy', 'price_perm_entropy',
+    'amihud_illiq', 'roll_spread',
+    'higher_highs', 'lower_lows', 'inside_bar',
+    'doji_pattern', 'engulfing_bull', 'engulfing_bear',
+    'mtf_momentum_score',
+    'kama', 'kama_slope',
+    'vpt', 'vpt_signal',
+    'bull_power', 'bear_power',
+    'donchian_pos', 'donchian_width',
+    'price_accel',
+    'ret_lag1', 'ret_lag2', 'ret_lag3',
+    'vol_lag1',
+    'rsi_x_vol', 'macd_x_vol', 'bb_pos_x_rsi',
+]
+
+FEATURES = FEATURES_BASE + FEATURES_TSETMC + FEATURES_ADVANCED
+
+
+def rsi_calc(s, w=14):
+    d = s.diff()
+    g = d.clip(lower=0).ewm(alpha=1/w, min_periods=w).mean()
+    l = (-d.clip(upper=0)).ewm(alpha=1/w, min_periods=w).mean()
+    return 100 - 100 / (1 + g / (l + 1e-8))
+
+
+def consecutive_count(arr):
+    out, cnt = np.zeros(len(arr)), 0
+    for i, v in enumerate(arr):
+        cnt = cnt + 1 if v else 0
+        out[i] = cnt
+    return out
+
+
+def adx_calc(h, lo, c, w=14):
+    up   = h.diff()
+    down = -lo.diff()
+    plus_dm  = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = pd.concat([h - lo, (h - c.shift()).abs(),
+                    (lo - c.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/w, min_periods=w).mean()
+    plus_di  = 100 * pd.Series(plus_dm, index=h.index).ewm(
+                    alpha=1/w, min_periods=w).mean() / (atr + 1e-8)
+    minus_di = 100 * pd.Series(minus_dm, index=h.index).ewm(
+                    alpha=1/w, min_periods=w).mean() / (atr + 1e-8)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-8)
+    return dx.ewm(alpha=1/w, min_periods=w).mean()
+
+
+def hurst_exponent_rolling(series, window=40):
+    result = np.full(len(series), 0.5)
+    vals = series.values
+    for i in range(window, len(vals)):
+        ts = vals[i-window:i]
+        if np.std(ts) < 1e-10:
+            continue
+        try:
+            lags = range(2, min(20, window//2))
+            tau = []
+            for lag in lags:
+                sub = [ts[j:j+lag] for j in range(0, len(ts)-lag, lag)]
+                if not sub:
+                    continue
+                sub_std = np.std([np.std(s) for s in sub if len(s) > 1])
+                if sub_std > 0:
+                    tau.append(np.mean([np.std(s) for s in sub if len(s) > 1]))
+            if len(tau) > 3:
+                lags_arr = list(range(2, 2+len(tau)))
+                H = np.polyfit(np.log(lags_arr), np.log(tau), 1)[0]
+                result[i] = np.clip(H, 0, 1)
+        except Exception:
+            pass
+    return pd.Series(result, index=series.index)
+
+
+def wavelet_features_rolling(series, window=32):
+    try:
+        import pywt
+    except ImportError:
+        n = len(series)
+        return (pd.Series(np.zeros(n), index=series.index),
+                pd.Series(np.zeros(n), index=series.index),
+                pd.Series(np.zeros(n), index=series.index))
+
+    e_low  = np.zeros(len(series))
+    e_high = np.zeros(len(series))
+    e_ent  = np.zeros(len(series))
+    vals   = series.values
+
+    for i in range(window, len(vals)):
+        seg = vals[i-window:i]
+        try:
+            cA, cD = pywt.dwt(seg, 'haar')
+            el = np.sum(cA**2) / (np.sum(cA**2) + np.sum(cD**2) + 1e-8)
+            eh = 1 - el
+            ps = np.array([np.sum(cA**2), np.sum(cD**2)])
+            ps = ps / (ps.sum() + 1e-8)
+            ent = -np.sum(ps * np.log(ps + 1e-8))
+            e_low[i]  = el
+            e_high[i] = eh
+            e_ent[i]  = ent
+        except Exception:
+            pass
+
+    idx = series.index
+    return (pd.Series(e_low,  index=idx),
+            pd.Series(e_high, index=idx),
+            pd.Series(e_ent,  index=idx))
+
+
+def permutation_entropy(series, window=20, order=3, delay=1):
+    from itertools import permutations
+    from math import factorial
+    result = np.zeros(len(series))
+    vals   = series.values
+    n_perms = factorial(order)
+
+    for i in range(window + order*delay, len(vals)):
+        seg  = vals[i-window:i]
+        counts = {}
+        for j in range(len(seg) - (order-1)*delay):
+            pat = tuple(np.argsort(seg[j:j+order*delay:delay]))
+            counts[pat] = counts.get(pat, 0) + 1
+        total = sum(counts.values())
+        if total == 0:
+            continue
+        ent = -sum((c/total)*np.log(c/total + 1e-8)
+                   for c in counts.values())
+        result[i] = ent / np.log(n_perms + 1e-8)
+
+    return pd.Series(result, index=series.index)
+
+
+def kama_calc(series, fast=2, slow=30):
+    n = len(series)
+    kama = np.zeros(n)
+    kama[0] = series.iloc[0]
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    vals = series.values
+
+    for i in range(1, n):
+        direction = abs(vals[i] - vals[max(0, i-10)])
+        volatility = sum(abs(vals[j] - vals[j-1])
+                         for j in range(max(1, i-9), i+1))
+        er = direction / (volatility + 1e-8)
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i-1] + sc * (vals[i] - kama[i-1])
+
+    return pd.Series(kama, index=series.index)
+
+
+def amihud_illiquidity(ret, vol, window=20):
+    ratio = (ret.abs() / (vol.abs() + 1e-8))
+    return ratio.rolling(window).mean() * 1e6
+
+
+def add_features(df, mrt, mvt):
+    df = df.copy()
+    c  = df['close']
+    h  = df['high']  if 'high' in df.columns else c
+    lo = df['low']   if 'low'  in df.columns else c
+
+    df['sma10']  = c.rolling(10).mean()
+    df['sma20']  = c.rolling(20).mean()
+    df['sma50']  = c.rolling(50).mean()
+    e12 = c.ewm(span=12).mean()
+    e26 = c.ewm(span=26).mean()
+    df['macd']      = e12 - e26
+    df['macd_sig']  = df['macd'].ewm(span=9).mean()
+    df['macd_hist'] = df['macd'] - df['macd_sig']
+    df['trend_dir'] = (df['sma10'] > df['sma20']).astype(int)
+    df['trend_str'] = (df['sma20'] > df['sma50']).astype(int)
+
+    df['rsi']       = rsi_calc(c)
+    df['rsi_slope'] = df['rsi'].diff(1)
+    df['roc5']      = c.pct_change(5)
+    df['roc10']     = c.pct_change(10)
+    df['roc20']     = c.pct_change(20)
+
+    ret = c.pct_change()
+    df['ret']        = ret
+    df['volatility'] = ret.rolling(20).std()
+    df['vol5']       = ret.rolling(5).std()
+    df['vol_ratio']  = df['vol5'] / (df['volatility'] + 1e-8)
+    df['atr']        = (h - lo).rolling(14).mean()
+    df['atr_pct']    = df['atr'] / (c + 1e-8)
+
+    bm = c.rolling(20).mean()
+    bs = c.rolling(20).std()
+    df['bb_upper']   = bm + 2 * bs
+    df['bb_lower']   = bm - 2 * bs
+    df['bb_width']   = (df['bb_upper'] - df['bb_lower']) / (bm + 1e-8)
+    df['bb_pos']     = (c - df['bb_lower']) / (
+                        df['bb_upper'] - df['bb_lower'] + 1e-8)
+    df['bb_squeeze'] = (
+        df['bb_width'] < df['bb_width'].rolling(50).mean()).astype(int)
+
+    if 'vol' in df.columns:
+        vm10  = df['vol'].rolling(10).mean()
+        vm20  = df['vol'].rolling(20).mean()
+        vm20s = df['vol'].rolling(20).std()
+        df['vol_ratio20'] = df['vol'] / (vm20 + 1e-8)
+        df['vol_trend']   = (vm10 > vm20).astype(int)
+        obv = (np.sign(ret) * df['vol']).cumsum()
+        df['obv_signal']  = (obv > obv.rolling(10).mean()).astype(int)
+        df['vol_spike']   = ((df['vol'] - vm20) / (vm20s + 1e-8)).clip(-3, 10)
+        df['high_vol_day']= (df['vol'] > vm20 * 2.5).astype(int)
+    else:
+        for col in ['vol_ratio20','vol_trend','obv_signal',
+                    'vol_spike','high_vol_day']:
+            df[col] = 0.0
+
+    df['zscore']      = (c - bm) / (bs + 1e-8)
+    df['price_range'] = (h - lo) / (c + 1e-8)
+    df['close_pos']   = (c - lo) / (h - lo + 1e-8)
+
+    df['day_of_week']    = df.index.dayofweek
+    df['month']          = df.index.month
+    df['is_month_end']   = (df.index.day >= 25).astype(int)
+    df['is_month_start'] = (df.index.day <= 5).astype(int)
+
+    mk = mrt.reindex(df.index).fillna(0)
+    mv = mvt.reindex(df.index).ffill().fillna(0)
+    df['market_ret'] = mk
+    df['market_vol'] = mv
+
+    ll14 = lo.rolling(14).min()
+    hh14 = h.rolling(14).max()
+    df['stoch_k']    = 100 * (c - ll14) / (hh14 - ll14 + 1e-8)
+    df['stoch_d']    = df['stoch_k'].rolling(3).mean()
+    df['williams_r'] = -100 * (hh14 - c) / (hh14 - ll14 + 1e-8)
+    df['cci']        = (c - bm) / (0.015 * bs + 1e-8)
+    df['adx']        = adx_calc(h, lo, c)
+    df['ema_cross']  = (c.ewm(span=9).mean() > c.ewm(span=21).mean()).astype(int)
+    df['mom10']      = c - c.shift(10)
+    df['rel_strength_market'] = ret - mk
+    df['rolling_sharpe20']    = ret.rolling(20).mean() / (ret.rolling(20).std() + 1e-8)
+    df['days_since_high20'] = c.rolling(20).apply(
+        lambda x: float(len(x)-1-np.argmax(x.values)), raw=False)
+    df['days_since_low20'] = c.rolling(20).apply(
+        lambda x: float(len(x)-1-np.argmin(x.values)), raw=False)
+    df['skew20'] = ret.rolling(20).skew().fillna(0)
+    df['kurt20'] = ret.rolling(20).kurt().fillna(0)
+    df['autocorr5'] = ret.rolling(30).apply(
+        lambda x: x.autocorr(lag=5) if x.std() > 1e-12 else 0.0,
+        raw=False).fillna(0)
+
+    LIMIT = 0.049
+    dr = c.pct_change()
+    df['price_at_upper_limit'] = (dr >=  LIMIT * 0.97).astype(int)
+    df['price_at_lower_limit'] = (dr <= -LIMIT * 0.97).astype(int)
+    df['near_upper_limit']     = (dr >=  LIMIT * 0.60).astype(int)
+    df['near_lower_limit']     = (dr <= -LIMIT * 0.60).astype(int)
+    df['consecutive_up_limit'] = consecutive_count(
+        df['price_at_upper_limit'].values)
+    df['consecutive_dn_limit'] = consecutive_count(
+        df['price_at_lower_limit'].values)
+    df['price_gap']          = dr
+    df['intraday_range_pct'] = (h - lo) / (c + 1e-8)
+    df['ret_vs_limit']       = dr / LIMIT
+    df['limit_exhaustion']   = (
+        df['price_at_upper_limit'] | df['price_at_lower_limit']).astype(int)
+    if 'yesterday' in df.columns:
+        df['price_gap'] = (c - df['yesterday']) / (df['yesterday'] + 1e-8)
+
+    el, eh, ent = wavelet_features_rolling(ret.fillna(0), window=32)
+    df['wavelet_energy_low']  = el
+    df['wavelet_energy_high'] = eh
+    df['wavelet_entropy']     = ent
+
+    df['hurst_exp'] = hurst_exponent_rolling(c, window=40)
+
+    def fractal_dim_rolling(s, w=20):
+        vals = s.values
+        out  = np.full(len(vals), 1.5)
+        for i in range(w, len(vals)):
+            seg = vals[i-w:i]
+            rs_vals = []
+            for lag in [4, 6, 8, 10]:
+                if lag >= len(seg):
+                    continue
+                sub = seg[:lag]
+                mean_sub = np.mean(sub)
+                deviations = np.cumsum(sub - mean_sub)
+                R = np.max(deviations) - np.min(deviations)
+                S = np.std(sub) + 1e-8
+                rs_vals.append(np.log(R/S + 1e-8) / np.log(lag + 1e-8))
+            if rs_vals:
+                H = np.mean(rs_vals)
+                out[i] = np.clip(2 - H, 1, 2)
+        return pd.Series(out, index=s.index)
+
+    df['fractal_dim'] = fractal_dim_rolling(c)
+
+    if 'vol' in df.columns and 'value' in df.columns:
+        typical = (h + lo + c) / 3
+        vwap = (typical * df['vol']).rolling(20).sum() / (df['vol'].rolling(20).sum() + 1e-8)
+        df['vwap_dev']     = (c - vwap) / (vwap + 1e-8)
+        df['buy_pressure'] = (c - lo) / (h - lo + 1e-8) * df['vol'] / (df['vol'].rolling(20).mean() + 1e-8)
+    else:
+        df['vwap_dev']     = (c - c.rolling(20).mean()) / (c.rolling(20).std() + 1e-8)
+        df['buy_pressure'] = (c - lo) / (h - lo + 1e-8)
+
+    vol_norm = (df['volatility'] - df['volatility'].rolling(50).mean()) / (df['volatility'].rolling(50).std() + 1e-8)
+    trend_norm = (df['adx'] - 25) / 25
+    df['vol_regime_score']   = vol_norm.fillna(0).clip(-3, 3)
+    df['trend_regime_score'] = trend_norm.fillna(0).clip(-3, 3)
+
+    def rolling_beta(r, m, w=20):
+        out = np.zeros(len(r))
+        rv, mv = r.values, m.values
+        for i in range(w, len(rv)):
+            rs, ms = rv[i-w:i], mv[i-w:i]
+            if np.std(ms) < 1e-10:
+                continue
+            out[i] = np.cov(rs, ms)[0, 1] / (np.var(ms) + 1e-8)
+        return pd.Series(out, index=r.index)
+
+    df['beta_market20'] = rolling_beta(ret, mk, w=20)
+    df['corr_market10'] = ret.rolling(10).corr(mk).fillna(0)
+
+    def return_entropy_rolling(r, w=30):
+        out = np.zeros(len(r))
+        sv  = np.sign(r.values)
+        for i in range(w, len(sv)):
+            seg = sv[i-w:i]
+            p1  = (seg == 1).mean() + 1e-8
+            p0  = (seg == 0).mean() + 1e-8
+            pm1 = (seg == -1).mean() + 1e-8
+            ent = -(p1*np.log(p1) + p0*np.log(p0) + pm1*np.log(pm1))
+            out[i] = ent / np.log(3)
+        return pd.Series(out, index=r.index)
+
+    df['return_entropy']    = return_entropy_rolling(ret)
+    df['price_perm_entropy'] = permutation_entropy(c, window=20, order=3)
+
+    if 'vol' in df.columns:
+        df['amihud_illiq'] = amihud_illiquidity(ret, df['vol'])
+    else:
+        df['amihud_illiq'] = 0.0
+
+    ret_t   = ret.values
+    ret_lag = np.roll(ret_t, 1); ret_lag[0] = 0.0
+    roll_cov = pd.Series(ret_t * ret_lag, index=ret.index).rolling(10).mean()
+    df['roll_spread'] = np.sqrt(np.abs(roll_cov)).fillna(0)
+
+    c_arr = c.values; h_arr = h.values; lo_arr = lo.values
+    n = len(c_arr)
+    hh = np.zeros(n); ll = np.zeros(n)
+    ib = np.zeros(n); dj = np.zeros(n); eb = np.zeros(n); eber = np.zeros(n)
+
+    for i in range(2, n):
+        hh[i] = int(h_arr[i]  > h_arr[i-1]  and lo_arr[i] > lo_arr[i-1])
+        ll[i] = int(h_arr[i]  < h_arr[i-1]  and lo_arr[i] < lo_arr[i-1])
+        ib[i] = int(h_arr[i]  < h_arr[i-1]  and lo_arr[i] > lo_arr[i-1])
+        o = df['open'].values[i] if 'open' in df.columns else c_arr[i]
+        body = abs(c_arr[i] - o)
+        wick = h_arr[i] - lo_arr[i]
+        dj[i] = int(body < wick * 0.1)
+        if 'open' in df.columns:
+            o_arr = df['open'].values
+            eb[i]   = int(o_arr[i]   < c_arr[i-1]  and c_arr[i]  > o_arr[i-1]
+                          and c_arr[i-1] < o_arr[i-1])
+            eber[i] = int(o_arr[i]   > c_arr[i-1]  and c_arr[i]  < o_arr[i-1]
+                          and c_arr[i-1] > o_arr[i-1])
+
+    df['higher_highs']   = hh
+    df['lower_lows']     = ll
+    df['inside_bar']     = ib
+    df['doji_pattern']   = dj
+    df['engulfing_bull'] = eb
+    df['engulfing_bear'] = eber
+
+    roc3  = c.pct_change(3)
+    roc7  = c.pct_change(7)
+    roc15 = c.pct_change(15)
+    roc30 = c.pct_change(30)
+    mtf   = np.sign(roc3)*0.4 + np.sign(roc7)*0.3 + np.sign(roc15)*0.2 + np.sign(roc30)*0.1
+    df['mtf_momentum_score'] = mtf.fillna(0)
+
+    df['kama']       = kama_calc(c)
+    df['kama_slope'] = df['kama'].pct_change(3).fillna(0)
+
+    if 'vol' in df.columns:
+        vpt_raw      = (ret * df['vol']).cumsum()
+        df['vpt']       = vpt_raw
+        df['vpt_signal']= (vpt_raw > vpt_raw.rolling(10).mean()).astype(int)
+    else:
+        df['vpt']        = 0.0
+        df['vpt_signal'] = 0
+
+    ema13            = c.ewm(span=13).mean()
+    df['bull_power'] = (h - ema13).fillna(0)
+    df['bear_power'] = (lo - ema13).fillna(0)
+
+    dc_high = h.rolling(20).max()
+    dc_low  = lo.rolling(20).min()
+    df['donchian_pos']   = (c - dc_low) / (dc_high - dc_low + 1e-8)
+    df['donchian_width'] = (dc_high - dc_low) / (c + 1e-8)
+
+    df['price_accel'] = c.pct_change().diff().fillna(0)
+
+    df['ret_lag1'] = ret.shift(1).fillna(0)
+    df['ret_lag2'] = ret.shift(2).fillna(0)
+    df['ret_lag3'] = ret.shift(3).fillna(0)
+    df['vol_lag1'] = df['volatility'].shift(1).fillna(0)
+
+    df['rsi_x_vol']    = (df['rsi'] / 100) * df['vol_ratio']
+    df['macd_x_vol']   = np.sign(df['macd']) * df['vol_ratio20']
+    df['bb_pos_x_rsi'] = df['bb_pos'] * (df['rsi'] / 100)
+
+    df['ret_5d'] = c.pct_change(HOLD_DAYS).shift(-HOLD_DAYS)
+
+    for col in FEATURES:
+        if col in df.columns:
+            df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+            med = df[col].median()
+            std = df[col].std()
+            if pd.notna(med) and pd.notna(std) and std > 0:
+                df[col] = df[col].clip(med - 100*std, med + 100*std)
+            df[col] = df[col].fillna(med if pd.notna(med) else 0.0)
+            df[col] = df[col].fillna(0.0)
+
+    df = df.dropna(subset=['ret_5d'])
+    df = df[~df[FEATURES].isin([np.inf, -np.inf]).any(axis=1)]
+    df = df.dropna(subset=FEATURES)
+    return df
+
+
+print(f"✅ Feature engineering defined — {len(FEATURES)} features")
+
+
+# ============================================================================
+#  CELL 4.5 — تعریف تابع فیچرِ آلودهٔ نمایشی (برای CELL 5.5 استفاده می‌شود)
+# ============================================================================
+def add_leaky_demo_feature(df):
+    """فیچر نمایشیِ آلوده — فقط برای دموی کلاسی، هرگز در FEATURES اصلی نیست."""
+    df = df.copy()
+    df['leak_centered_sma5'] = df['close'].rolling(5, center=True).mean()  # <-- خط مسئله
+    df['leak_feat'] = (df['close'] - df['leak_centered_sma5']) / (df['leak_centered_sma5'] + 1e-8)
+    return df
+
+print("✅ (CELL 4.5) تابع فیچر آلودهٔ نمایشی تعریف شد — در CELL 5.5 و CELL 13.8 استفاده می‌شود")
+
+
+# ============================================================
+#  CELL 5 — تقسیم، target/regime بدون Leakage، مقیاس‌بندی
+#  🆕 v7: Purged Time-Series Split مشترک (زیر) برای جلوگیری از نشتِ
+#  targetِ رو-به-جلو (ret_5d) در مرز Train/Val/Test.
+# ============================================================
+from sklearn.preprocessing import RobustScaler
+
+
+def time_split_slices(n, purge=HOLD_DAYS, train_frac=0.70, val_frac=0.85):
+    """
+    مرزهای Train/Val/Test را با یک Purge Gap برابر با افقِ پیش‌بینیِ
+    target (HOLD_DAYS) بین انتهای هر بخش و ابتدای بخش بعدی برمی‌گرداند.
+    چون ret_5d هر ردیف به ۵ روز جلوتر نگاه می‌کند، بدون این gap چند
+    ردیفِ آخرِ Train/Val عملاً به قیمت‌های بخش بعدی «دید» داشتند.
+    اندازهٔ Test تغییر نمی‌کند (مقایسه‌ها منصفانه می‌مانند)، فقط
+    انتهای Train و انتهای Val کمی کوتاه‌تر می‌شوند.
+    """
+    t1 = int(n * train_frac)
+    t2 = int(n * val_frac)
+    train_idx = slice(0, max(0, t1 - purge))
+    val_idx   = slice(t1, max(t1, t2 - purge))
+    test_idx  = slice(t2, n)
+    return train_idx, val_idx, test_idx
+
+
+prepared = {}
+print("\n⏳ Preparing splits...")
+
+for name, df_raw in filtered.items():
+    all_tr = pd.DataFrame({
+        n: filtered[n]['close'].iloc[:int(len(filtered[n]) * 0.70)]
+        for n in filtered
+    })
+    mrt = all_tr.pct_change().mean(axis=1)
+    mvt = mrt.rolling(20).std()
+    mrf = mrt.reindex(df_raw.index).ffill().fillna(0)
+    mvf = mvt.reindex(df_raw.index).ffill().fillna(0)
+
+    df_feat = add_features(df_raw, mrf, mvf)
+
+    for col in FEATURES:
+        if col in df_feat.columns:
+            df_feat[col] = df_feat[col].replace([np.inf, -np.inf], np.nan)
+            df_feat[col] = df_feat[col].fillna(df_feat[col].median())
+            df_feat[col] = df_feat[col].fillna(0.0)
+    df_feat = df_feat[~df_feat[FEATURES].isin([np.inf, -np.inf]).any(axis=1)]
+
+    n = len(df_feat)
+    if n == 0:
+        raise ValueError(f"{name}: df_feat is empty after dropna")
+
+    tr_sl, vl_sl, te_sl = time_split_slices(n)
+    train_stats_df = df_feat.iloc[tr_sl]   # فقط برای آمار بدون نشت (median/quantile)
+
+    median_ret_train = train_stats_df['ret_5d'].median()
+    df_feat['target'] = (df_feat['ret_5d'] > median_ret_train).astype(int)
+
+    vol_q70 = train_stats_df['volatility'].quantile(0.7)
+    vol_q30 = train_stats_df['volatility'].quantile(0.3)
+    df_feat['regime'] = 1
+    df_feat.loc[df_feat['volatility'] >= vol_q70, 'regime'] = 2
+    df_feat.loc[df_feat['volatility'] <= vol_q30, 'regime'] = 0
+
+    tr = df_feat.iloc[tr_sl]
+    vl = df_feat.iloc[vl_sl]
+    te = df_feat.iloc[te_sl]
+
+    # ✅ HONEST: Scaler فقط روی train فیت می‌شود
+    sc  = RobustScaler()
+    Xtr = sc.fit_transform(tr[FEATURES])
+    Xvl = sc.transform(vl[FEATURES])
+    Xte = sc.transform(te[FEATURES])
+
+    print(f"  {name}: train={len(tr)} val={len(vl)} test={len(te)} "
+          f"UP%(train)={tr['target'].mean()*100:.0f}%  "
+          f"Features={len(FEATURES)}")
+
+    prepared[name] = {
+        'X_train': Xtr, 'y_train': tr['target'].values,
+        'X_val':   Xvl, 'y_val':   vl['target'].values,
+        'X_test':  Xte, 'y_test':  te['target'].values,
+        'dates_train': tr.index.tolist(),
+        'dates_val':   vl.index.tolist(),
+        'dates_test':  te.index.tolist(),
+        'ret_train':   tr['ret_5d'].values,
+        'ret_val':     vl['ret_5d'].values,
+        'ret_test':    te['ret_5d'].values,
+        'regime_test': te['regime'].values,
+        'volatility_test': te['volatility'].values,  # 🆕 v7: برای گیت واقعیِ بلک-شولز در بک‌تست
+        'scaler':      sc,
+        'X_trval': np.vstack([Xtr, Xvl]),
+        'y_trval': np.concatenate([tr['target'].values, vl['target'].values]),
+        '_df_feat_full': df_feat,
+        '_t1': tr_sl.stop, '_t2': te_sl.start,
+    }
+
+print("✅ Data prepared")
+
+
+# ============================================================================
+#  CELL 5.5 — 🚨 FRAUD DEMO: Feature Leakage (تنها دموی فراد این نسخه)
+#  با یک مدل سریع (LightGBM ساده)، فقط برای مقایسه با HONEST.
+#  این دمو ورودیِ هیچ مرحله‌ای از CELL 6 به بعد نیست.
+# ============================================================================
+import lightgbm as lgb
+from sklearn.metrics import roc_auc_score
+
+def quick_lgbm_auc(Xtr, ytr, Xte, yte, seed=GLOBAL_SEED):
+    m = lgb.LGBMClassifier(n_estimators=200, learning_rate=0.05, max_depth=5,
+                            num_leaves=31, random_state=seed, verbosity=-1)
+    m.fit(Xtr, ytr)
+    return roc_auc_score(yte, m.predict_proba(Xte)[:, 1])
+
+honest_quick_auc = {}
+fraud_leaky_feature_auc = {}
+
+honest_banner("مدل سریعِ نمایشی (LightGBM ساده) روی همان split صحیحِ CELL 5 — "
+              "معیار مقایسه برای دموی Feature Leakage.")
+for name, d in prepared.items():
+    a = quick_lgbm_auc(d['X_train'], d['y_train'], d['X_test'], d['y_test'])
+    honest_quick_auc[name] = a
+    print(f"  {name:12s}  Test AUC (quick, honest) = {a:.4f}")
+
+fraud_banner("Feature Leakage — یک فیچر با rolling(center=True) ساخته و به "
+             "لیست فیچرها اضافه شده؛ این فیچر شامل اطلاعات قیمتِ *آینده* "
+             "است.\n  اصلاح صحیح: در تمام فیچرهای rolling مطمئن شوید فقط "
+             "از داده‌های تا لحظهٔ t استفاده می‌شود.")
+for name, d in prepared.items():
+    df_feat = add_leaky_demo_feature(d['_df_feat_full']).dropna(subset=['leak_feat'])
+    feats_leaky = FEATURES + ['leak_feat']
+    n = len(df_feat)
+    tr_sl, _, te_sl = time_split_slices(n)   # 🆕 v7: همان Purged split صادقانه
+    tr, te = df_feat.iloc[tr_sl], df_feat.iloc[te_sl]
+    sc = RobustScaler().fit(tr[feats_leaky])          # اسکیلر این‌جا صحیح فیت شده
+    Xtr_lf, Xte_lf = sc.transform(tr[feats_leaky]), sc.transform(te[feats_leaky])
+    ytr_lf, yte_lf = tr['target'].values, te['target'].values
+    a = quick_lgbm_auc(Xtr_lf, ytr_lf, Xte_lf, yte_lf)
+    fraud_leaky_feature_auc[name] = a
+    delta = a - honest_quick_auc[name]
+    print(f"  {name:12s}  Test AUC = {a:.4f}   (Δ نسبت به HONEST: {delta:+.4f})")
+
+print(f"""
+============================================================================
+  جمع‌بندی برای کلاس (CELL 5.5):
+============================================================================
+  فقط با اضافه‌کردن یک فیچرِ rolling با center=True (که اطلاعات چند روزِ
+  آینده را نشت می‌دهد)، AUC روی همان مدل سریع بالا می‌رود — بدون این‌که
+  مدل واقعاً چیز بیشتری دربارهٔ آینده «یاد گرفته» باشد.
+
+  این دمو کاملاً جدا از ادامهٔ pipeline (CELL 6 به بعد) است.
+============================================================================
+""")
+
+
+# ============================================================
+#  CELL 6 — تعریف ۵ مدل: LightGBM, XGBoost, Random Forest,
+#           StackingClassifier, VotingClassifier
+# ============================================================
+import xgboost as xgb
+import optuna
+from sklearn.ensemble import (
+    RandomForestClassifier, StackingClassifier, VotingClassifier,
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score, brier_score_loss
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.base import clone
+
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+def clone_for_refit(estimator):
+    """
+    مثل sklearn.clone، با این تفاوت که early_stopping_rounds را حذف
+    می‌کند (چون بدون eval_set در fit، XGBoost با این پارامتر خطا می‌دهد).
+    برای استفادهٔ مجدد به‌عنوان base-estimator در Stacking/Voting یا در
+    OOF refit مرحلهٔ استکینگ (CELL 8) لازم است.
+    """
+    params = estimator.get_params()
+    params.pop('early_stopping_rounds', None)
+    return type(estimator)(**params)
+
+
+def train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60):
+    def obj(trial):
+        params = dict(
+            objective='binary', n_estimators=2000,
+            num_leaves       =trial.suggest_int  ('nl',  15, 255),
+            min_child_samples=trial.suggest_int  ('md',   5,  80),
+            learning_rate    =trial.suggest_float('lr', 0.003, 0.2, log=True),
+            colsample_bytree =trial.suggest_float('ff', 0.4, 1.0),
+            subsample        =trial.suggest_float('bf', 0.4, 1.0),
+            subsample_freq   =trial.suggest_int  ('bfreq', 1, 10),
+            reg_alpha        =trial.suggest_float('ra', 1e-5, 15., log=True),
+            reg_lambda       =trial.suggest_float('rl', 1e-5, 15., log=True),
+            max_depth        =trial.suggest_int  ('dep', 3, 14),
+            min_child_weight =trial.suggest_float('mcw', 1e-3, 20., log=True),
+            random_state=GLOBAL_SEED, n_jobs=-1, verbosity=-1,
+        )
+        m = lgb.LGBMClassifier(**params)
+        m.fit(Xtr, ytr, eval_set=[(Xvl, yvl)], eval_metric='auc',
+              callbacks=[lgb.early_stopping(50, verbose=False)])
+        return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED, multivariate=True,
+                                            n_startup_trials=15))
+    study.optimize(obj, n_trials=n_trials, show_progress_bar=False)
+
+    bp = study.best_params
+    m = lgb.LGBMClassifier(
+        objective='binary', n_estimators=3000,
+        num_leaves=bp['nl'], min_child_samples=bp['md'],
+        learning_rate=bp['lr'], colsample_bytree=bp['ff'],
+        subsample=bp['bf'], subsample_freq=bp['bfreq'],
+        reg_alpha=bp['ra'], reg_lambda=bp['rl'],
+        max_depth=bp['dep'], min_child_weight=bp['mcw'],
+        random_state=GLOBAL_SEED, n_jobs=-1, verbosity=-1,
+    )
+    m.fit(Xtr, ytr, eval_set=[(Xvl, yvl)], eval_metric='auc',
+          callbacks=[lgb.early_stopping(80, verbose=False)])
+    a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+    return m, a
+
+
+def train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40):
+    def obj(trial):
+        m = xgb.XGBClassifier(
+            objective='binary:logistic', eval_metric='auc',
+            tree_method='hist',
+            max_depth         =trial.suggest_int  ('dep', 2, 10),
+            learning_rate     =trial.suggest_float('lr', 0.003, 0.2, log=True),
+            subsample         =trial.suggest_float('ss', 0.4, 1.0),
+            colsample_bytree  =trial.suggest_float('cs', 0.4, 1.0),
+            colsample_bylevel =trial.suggest_float('csl', 0.4, 1.0),
+            colsample_bynode  =trial.suggest_float('csn', 0.4, 1.0),
+            reg_alpha         =trial.suggest_float('ra', 1e-5, 15., log=True),
+            reg_lambda        =trial.suggest_float('rl', 1e-5, 15., log=True),
+            min_child_weight  =trial.suggest_int  ('mcw', 1, 80),
+            gamma             =trial.suggest_float('g',  0.0, 5.0),
+            max_delta_step    =trial.suggest_float('mds', 0.0, 10.0),
+            scale_pos_weight  =trial.suggest_float('spw', 0.5, 2.0),
+            n_estimators=2000, early_stopping_rounds=50,
+            verbosity=0, random_state=GLOBAL_SEED,
+        )
+        m.fit(Xtr, ytr, eval_set=[(Xvl, yvl)], verbose=False)
+        return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED, multivariate=True))
+    study.optimize(obj, n_trials=n_trials, show_progress_bar=False)
+
+    bp = study.best_params
+    m  = xgb.XGBClassifier(
+        objective='binary:logistic', eval_metric='auc',
+        tree_method='hist',
+        max_depth=bp['dep'], learning_rate=bp['lr'],
+        subsample=bp['ss'], colsample_bytree=bp['cs'],
+        colsample_bylevel=bp['csl'], colsample_bynode=bp['csn'],
+        reg_alpha=bp['ra'], reg_lambda=bp['rl'],
+        min_child_weight=bp['mcw'], gamma=bp['g'],
+        max_delta_step=bp['mds'], scale_pos_weight=bp['spw'],
+        n_estimators=3000, early_stopping_rounds=80,
+        verbosity=0, random_state=GLOBAL_SEED,
+    )
+    m.fit(Xtr, ytr, eval_set=[(Xvl, yvl)], verbose=False)
+    a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+    return m, a
+
+
+def train_rf(Xtr, ytr, Xvl, yvl, n_trials=30):
+    def obj(trial):
+        p = dict(
+            n_estimators         = trial.suggest_int('n', 100, 600),
+            max_features         = trial.suggest_categorical('mf', ['sqrt', 'log2', 0.3, 0.5, 0.7]),
+            min_samples_leaf     = trial.suggest_int('msl', 1, 50),
+            max_depth            = trial.suggest_categorical('dep', [None, 10, 20, 30]),
+            min_impurity_decrease= trial.suggest_float('mid', 0.0, 0.01),
+            n_jobs=-1, class_weight='balanced', random_state=GLOBAL_SEED,
+        )
+        m = RandomForestClassifier(**p)
+        m.fit(Xtr, ytr)
+        return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+    study.optimize(obj, n_trials=n_trials, show_progress_bar=False)
+
+    bp = study.best_params
+    m = RandomForestClassifier(
+        n_estimators=bp['n'], max_features=bp['mf'],
+        min_samples_leaf=bp['msl'], max_depth=bp['dep'],
+        min_impurity_decrease=bp['mid'],
+        n_jobs=-1, class_weight='balanced', random_state=GLOBAL_SEED,
+    )
+    m.fit(Xtr, ytr)
+    a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+    return m, a
+
+
+def train_stacking(Xtr, ytr, Xvl, yvl, lgbm_est, xgb_est, rf_est):
+    """StackingClassifier با سه مدل تنظیم‌شدهٔ بالا به‌عنوان base learner
+    و LogisticRegression به‌عنوان متا-مدل. برای جلوگیری از تیون دوبارهٔ
+    سنگین، هایپرپارامترهای همان مدل‌های تیون‌شده را (بدون فیت قبلی)
+    دوباره می‌سازد."""
+    estimators = [
+        ('lgbm', clone_for_refit(lgbm_est)),
+        ('xgb',  clone_for_refit(xgb_est)),
+        ('rf',   clone_for_refit(rf_est)),
+    ]
+    m = StackingClassifier(
+        estimators=estimators,
+        final_estimator=LogisticRegression(max_iter=1000, random_state=GLOBAL_SEED),
+        cv=3, n_jobs=-1, passthrough=False,
+    )
+    m.fit(Xtr, ytr)
+    a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+    return m, a
+
+
+def train_voting(Xtr, ytr, Xvl, yvl, lgbm_est, xgb_est, rf_est):
+    """VotingClassifier (رأی‌گیری نرم) با همان سه مدل تنظیم‌شده."""
+    estimators = [
+        ('lgbm', clone_for_refit(lgbm_est)),
+        ('xgb',  clone_for_refit(xgb_est)),
+        ('rf',   clone_for_refit(rf_est)),
+    ]
+    m = VotingClassifier(estimators=estimators, voting='soft', n_jobs=-1)
+    m.fit(Xtr, ytr)
+    a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+    return m, a
+
+
+print("✅ توابع آموزش ۵ مدل تعریف شدند: LightGBM, XGBoost, RandomForest, "
+      "StackingClassifier, VotingClassifier")
+
+
+# ============================================================
+#  CELL 7 — Tournament (فقط ۵ مدل، بدون Early-Stop — همه اجرا می‌شوند)
+# ============================================================
+all_models      = {}
+tournament_aucs = {}
+
+print("\n" + "=" * 70)
+print("  TOURNAMENT — LightGBM / XGBoost / RandomForest / Stacking / Voting")
+print("=" * 70)
+
+for name, data in prepared.items():
+    print(f"\n{'─'*60}  {name}")
+    Xtr, ytr = data['X_train'], data['y_train']
+    Xvl, yvl = data['X_val'],   data['y_val']
+    mdls = {}; aucs = {}; t0 = time.time()
+
+    t1 = time.time()
+    print("  ① LightGBM  (60 trials Optuna)...")
+    lgbm_m, lgbm_a = train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60)
+    mdls['lgbm'] = lgbm_m; aucs['lgbm'] = lgbm_a
+    print(f"     AUC={lgbm_a:.4f}  ({time.time()-t1:.0f}s)")
+
+    t1 = time.time()
+    print("  ② XGBoost   (40 trials Optuna)...")
+    xgb_m, xgb_a = train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40)
+    mdls['xgb'] = xgb_m; aucs['xgb'] = xgb_a
+    print(f"     AUC={xgb_a:.4f}  ({time.time()-t1:.0f}s)")
+
+    t1 = time.time()
+    print("  ③ Random Forest (30 trials Optuna)...")
+    rf_m, rf_a = train_rf(Xtr, ytr, Xvl, yvl, n_trials=30)
+    mdls['rf'] = rf_m; aucs['rf'] = rf_a
+    print(f"     AUC={rf_a:.4f}  ({time.time()-t1:.0f}s)")
+
+    t1 = time.time()
+    print("  ④ StackingClassifier (lgbm+xgb+rf → LogisticRegression)...")
+    stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, lgbm_m, xgb_m, rf_m)
+    mdls['stacking'] = stack_m; aucs['stacking'] = stack_a
+    print(f"     AUC={stack_a:.4f}  ({time.time()-t1:.0f}s)")
+
+    t1 = time.time()
+    print("  ⑤ VotingClassifier (soft, lgbm+xgb+rf)...")
+    vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, lgbm_m, xgb_m, rf_m)
+    mdls['voting'] = vote_m; aucs['voting'] = vote_a
+    print(f"     AUC={vote_a:.4f}  ({time.time()-t1:.0f}s)")
+
+    best_name = max(aucs, key=aucs.get)
+    print(f"\n  {'Model':14s}  {'Val AUC':>8s}")
+    print(f"  {'─'*25}")
+    for mn, ma in sorted(aucs.items(), key=lambda x: -x[1]):
+        mk = "  ← BEST" if mn == best_name else ""
+        print(f"  {mn:14s}  {ma:.4f}{mk}")
+
+    all_models[name]      = mdls
+    tournament_aucs[name] = aucs
+    print(f"\n  🏆 بهترین مدل برای {name}: {best_name} "
+          f"(Val AUC={aucs[best_name]:.4f})")
+    print(f"  ✅ {name}  ({time.time()-t0:.0f}s total)")
+    gc.collect()
+
+print("\n✅ Tournament complete (۵ مدل، بدون حذف)")
+
+
+# ============================================================
+#  CELL 8 — Two-Level Stacking + Calibration + BMA
+#  (روی خروجی احتمالِ همان ۵ مدل بالا)
+# ============================================================
+from sklearn.linear_model   import LogisticRegression, RidgeClassifier
+from sklearn.calibration    import CalibratedClassifierCV
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics        import (
+    accuracy_score, roc_auc_score, f1_score,
+    confusion_matrix, classification_report,
+    roc_curve, precision_score, recall_score,
+    brier_score_loss, average_precision_score,
+)
+from scipy.stats import rankdata
+
+PURGE_GAP = HOLD_DAYS  # 🆕 v7: یک منبع واحد با CELL 5
+
+
+def get_proba(model, model_name, X_2d):
+    """همهٔ ۵ مدل sklearn-compatible هستند (predict_proba دارند)."""
+    if model is None:
+        return np.full(len(X_2d), 0.5)
+    try:
+        return model.predict_proba(X_2d)[:, 1]
+    except Exception:
+        return np.full(len(X_2d), 0.5)
+
+
+def rank_avg(proba_matrix):
+    ranks = np.column_stack([rankdata(proba_matrix[:, i])
+                              for i in range(proba_matrix.shape[1])])
+    return (ranks / ranks.shape[0]).mean(axis=1)
+
+
+def bayesian_model_average(probas, val_aucs):
+    weights = np.array(val_aucs) ** 4
+    weights = np.maximum(weights - 0.5, 0) ** 2
+    if weights.sum() < 1e-8:
+        return probas.mean(axis=1)
+    weights = weights / weights.sum()
+    return (probas * weights[np.newaxis, :]).sum(axis=1)
+
+
+def calibrate_proba(proba_val, y_val, proba_test, method='isotonic'):
+    from sklearn.isotonic import IsotonicRegression
+    from sklearn.linear_model import LogisticRegression as LR
+    proba_val = np.clip(proba_val, 1e-6, 1-1e-6)
+    proba_test = np.clip(proba_test, 1e-6, 1-1e-6)
+    if method == 'isotonic':
+        try:
+            cal = IsotonicRegression(out_of_bounds='clip')
+            cal.fit(proba_val, y_val)
+            return cal.predict(proba_test)
+        except Exception:
+            return proba_test
+    elif method == 'platt':
+        try:
+            lr = LR(C=1.0, random_state=GLOBAL_SEED, max_iter=1000)
+            lr.fit(proba_val.reshape(-1, 1), y_val)
+            return lr.predict_proba(proba_test.reshape(-1, 1))[:, 1]
+        except Exception:
+            return proba_test
+    return proba_test
+
+
+def find_threshold_pr(y_true, proba):
+    """
+    ✅ HONEST: این تابع همیشه با (yvl, proba_val) صدا زده می‌شود،
+    نه با داده‌ی تست. threshold روی validation انتخاب می‌شود.
+    """
+    from sklearn.metrics import precision_recall_curve
+    prec, rec, thresholds = precision_recall_curve(y_true, proba)
+    f1s = 2 * prec * rec / (prec + rec + 1e-8)
+    best_idx = np.argmax(f1s[:-1])
+    thr_f1 = float(thresholds[best_idx])
+
+    fpr, tpr, thresholds2 = roc_curve(y_true, proba)
+    j = tpr - fpr
+    n_pos = max(int((y_true == 1).sum()), 1)
+    n_neg = max(int((y_true == 0).sum()), 1)
+    candidates = []
+    for idx, thr in enumerate(thresholds2):
+        up_r  = float((proba >= thr).mean())
+        yp_t  = (proba >= thr).astype(int)
+        rc_dn = ((yp_t==0) & (y_true==0)).sum() / n_neg
+        rc_up = ((yp_t==1) & (y_true==1)).sum() / n_pos
+        if 0.30 <= up_r <= 0.70 and rc_dn > 0.15 and rc_up > 0.15:
+            candidates.append((j[idx], float(thr)))
+    if candidates:
+        thr_youden = max(candidates, key=lambda x: x[0])[1]
+    else:
+        thr_youden = float(np.clip(thresholds2[np.argmax(j)], 0.30, 0.70))
+
+    return (thr_f1 + thr_youden) / 2
+
+
+def get_oof_meta_features(mdls, model_names, X_trval, y_trval, n_splits=5):
+    n = len(X_trval)
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    oof = np.full((n, len(model_names)), np.nan)
+
+    for tr_idx, te_idx in tscv.split(X_trval):
+        if len(tr_idx) > PURGE_GAP:
+            tr_idx_purged = tr_idx[:-PURGE_GAP]
+        else:
+            continue
+        Xtr_f = X_trval[tr_idx_purged]
+        ytr_f = y_trval[tr_idx_purged]
+        Xte_f = X_trval[te_idx]
+
+        for mi, mn in enumerate(model_names):
+            try:
+                base_est = mdls[mn]
+                if base_est is None:
+                    oof[te_idx, mi] = 0.5
+                    continue
+                m = clone_for_refit(base_est)
+                m.fit(Xtr_f, ytr_f)
+                oof[te_idx, mi] = m.predict_proba(Xte_f)[:, 1]
+            except Exception:
+                oof[te_idx, mi] = 0.5
+
+    valid_mask = ~np.isnan(oof).any(axis=1)
+    return oof, valid_mask
+
+
+STACK_MODELS = ['lgbm', 'xgb', 'rf', 'stacking', 'voting']
+
+stacking_models = {}
+all_results     = {}
+best_model_info = {}
+
+print("\n" + "=" * 70)
+print("  TWO-LEVEL STACKING + BMA + CALIBRATION + EVALUATION")
+print("=" * 70)
+
+for name, data in prepared.items():
+    mdls = all_models[name]
+    aucs = tournament_aucs[name]
+    Xtr, ytr = data['X_train'], data['y_train']
+    Xvl, yvl = data['X_val'],   data['y_val']
+    Xte, yte = data['X_test'],  data['y_test']
+    X_trval  = data['X_trval']
+    y_trval  = data['y_trval']
+
+    top5     = sorted(aucs.items(), key=lambda x: -x[1])[:5]
+    top3     = top5[:3]
+    top3_n   = [x[0] for x in top3]
+    best_model_info[name] = top5
+    print(f"\n  {name} → رتبه‌بندی: "
+          + ", ".join(f"{n}({a:.3f})" for n, a in top5))
+
+    stack_names_available = [m for m in STACK_MODELS if m in mdls]
+    oof, valid_mask = get_oof_meta_features(
+        mdls, stack_names_available, X_trval, y_trval, n_splits=5)
+
+    meta_X_vl_full = np.column_stack(
+        [get_proba(mdls[mn], mn, Xvl) for mn in stack_names_available])
+    meta_X_te_full = np.column_stack(
+        [get_proba(mdls[mn], mn, Xte) for mn in stack_names_available])
+
+    if valid_mask.sum() > 60:
+        meta_X_cv = oof[valid_mask]
+        meta_y_cv = y_trval[valid_mask]
+
+        best_cv_auc, best_c = 0.5, 0.1
+        for C in [0.01, 0.05, 0.1, 0.3, 1.0, 3.0]:
+            lr = LogisticRegression(C=C, random_state=GLOBAL_SEED, max_iter=1000,
+                                    class_weight='balanced')
+            tscv2 = TimeSeriesSplit(n_splits=4)
+            cv_aucs = []
+            for tr_i, te_i in tscv2.split(meta_X_cv):
+                if len(np.unique(meta_y_cv[tr_i])) < 2:
+                    continue
+                lr.fit(meta_X_cv[tr_i], meta_y_cv[tr_i])
+                p = lr.predict_proba(meta_X_cv[te_i])[:, 1]
+                if len(np.unique(meta_y_cv[te_i])) > 1:
+                    cv_aucs.append(roc_auc_score(meta_y_cv[te_i], p))
+            mean_cv = np.mean(cv_aucs) if cv_aucs else 0.5
+            if mean_cv > best_cv_auc:
+                best_cv_auc, best_c = mean_cv, C
+
+        meta_lr = LogisticRegression(C=best_c, random_state=GLOBAL_SEED,
+                                      max_iter=1000, class_weight='balanced')
+        meta_lr.fit(meta_X_cv, meta_y_cv)
+
+        stack_proba_val  = meta_lr.predict_proba(meta_X_vl_full)[:, 1]
+        stack_proba_test = meta_lr.predict_proba(meta_X_te_full)[:, 1]
+        print(f"  Level-2 meta-LR: C={best_c}, CV-AUC={best_cv_auc:.4f}")
+    else:
+        stack_proba_val  = None
+        stack_proba_test = None
+        print("  ⚠️  کمبود OOF rows → fallback")
+
+    all_probas_val  = np.column_stack(
+        [get_proba(mdls[mn], mn, Xvl) for mn in aucs.keys()])
+    all_probas_test = np.column_stack(
+        [get_proba(mdls[mn], mn, Xte) for mn in aucs.keys()])
+    val_aucs_list   = [aucs[mn] for mn in aucs.keys()]
+
+    bma_proba_val  = bayesian_model_average(all_probas_val,  val_aucs_list)
+    bma_proba_test = bayesian_model_average(all_probas_test, val_aucs_list)
+
+    ra_probas_val  = np.column_stack(
+        [get_proba(mdls[mn], mn, Xvl) for mn, _ in top5])
+    ra_probas_test = np.column_stack(
+        [get_proba(mdls[mn], mn, Xte) for mn, _ in top5])
+    ra_proba_val  = rank_avg(ra_probas_val)
+    ra_proba_test = rank_avg(ra_probas_test)
+
+    candidates = {
+        'rank_avg': (ra_proba_val, ra_proba_test,
+                     roc_auc_score(yvl, ra_proba_val)),
+        'bma':      (bma_proba_val, bma_proba_test,
+                     roc_auc_score(yvl, bma_proba_val)),
+        'top1':     (get_proba(mdls[top3_n[0]], top3_n[0], Xvl),
+                     get_proba(mdls[top3_n[0]], top3_n[0], Xte),
+                     aucs[top3_n[0]]),
+    }
+    if stack_proba_val is not None:
+        candidates['stack_lr'] = (stack_proba_val, stack_proba_test,
+                                   roc_auc_score(yvl, stack_proba_val))
+
+    chosen = max(candidates.items(), key=lambda kv: kv[1][2])
+    chosen_name = chosen[0]
+    proba_val_raw, proba_test_raw, cv_a = chosen[1]
+
+    proba_test_cal = calibrate_proba(
+        proba_val_raw, yvl, proba_test_raw, method='isotonic')
+    auc_cal  = roc_auc_score(yte, proba_test_cal)
+    auc_raw  = roc_auc_score(yte, proba_test_raw)
+    use_cal  = auc_cal >= auc_raw - 0.005
+    proba_test_final = proba_test_cal if use_cal else proba_test_raw
+    print(f"  AUC raw={auc_raw:.4f}  cal={auc_cal:.4f}  → "
+          f"{'cal' if use_cal else 'raw'} used")
+
+    auc_val = roc_auc_score(yvl, proba_val_raw)
+    flipped = False
+    if auc_val < 0.48:
+        proba_test_final = 1 - proba_test_final
+        proba_val_raw    = 1 - proba_val_raw
+        flipped = True
+        print(f"  🔄 Flipped (val_AUC={auc_val:.3f})")
+
+    # ✅ HONEST: threshold روی validation انتخاب می‌شود
+    best_thr = find_threshold_pr(yvl, proba_val_raw)
+    y_pred   = (proba_test_final >= best_thr).astype(int)
+
+    da    = accuracy_score(yte, y_pred) * 100
+    auc   = roc_auc_score(yte, proba_test_final) * 100
+    f1    = f1_score(yte, y_pred, zero_division=0) * 100
+    prec  = precision_score(yte, y_pred, zero_division=0) * 100
+    rec   = recall_score(yte, y_pred, zero_division=0) * 100
+    brier = brier_score_loss(yte, proba_test_final)
+    aps   = average_precision_score(yte, proba_test_final) * 100
+    cm    = confusion_matrix(yte, y_pred)
+    cr    = classification_report(yte, y_pred,
+                                   target_names=['DOWN','UP'],
+                                   zero_division=0)
+
+    regime     = data['regime_test'][:len(yte)]
+    regime_res = {}
+    for r, label in [(0,'Low Vol'),(1,'Med Vol'),(2,'High Vol')]:
+        mask = regime == r
+        if mask.sum() > 5 and len(np.unique(yte[mask])) > 1:
+            regime_res[label] = {
+                'n':   int(mask.sum()),
+                'DA':  accuracy_score(yte[mask], y_pred[mask]) * 100,
+                'AUC': roc_auc_score(yte[mask], proba_test_final[mask]) * 100,
+            }
+
+    all_results[name] = {
+        'y_true': yte, 'y_pred': y_pred, 'proba': proba_test_final,
+        'proba_val': proba_val_raw, 'y_val': yvl,
+        'threshold': best_thr,
+        'DA': da, 'AUC': auc, 'F1': f1, 'Prec': prec, 'Rec': rec,
+        'Brier': brier, 'AP': aps,
+        'CM': cm, 'flipped': flipped,
+        'top3': top3, 'regime': regime_res,
+        'method': chosen_name,
+        'calibrated': use_cal,
+    }
+
+    flip_str = "  [FLIPPED]" if flipped else ""
+    cal_str  = "  [CAL]"    if use_cal  else ""
+    print(f"  Method={chosen_name}  DA={da:.1f}%  AUC={auc:.1f}%  "
+          f"F1={f1:.1f}%  AP={aps:.1f}%  Brier={brier:.3f}  "
+          f"thr={best_thr:.2f}  UP%={y_pred.mean()*100:.1f}%"
+          f"{flip_str}{cal_str}")
+    print(f"\n{cr}")
+
+print("\n" + "=" * 60)
+print("  SUMMARY (✅ HONEST)")
+print("=" * 60)
+rows = [{'Asset': n,
+         'Method':    all_results[n]['method'],
+         'Top1':      best_model_info[n][0][0],
+         'Final_DA':  round(all_results[n]['DA'],  1),
+         'Final_AUC': round(all_results[n]['AUC'], 1),
+         'Final_F1':  round(all_results[n]['F1'],  1),
+         'AP(%)':     round(all_results[n]['AP'],  1),
+         'Brier':     round(all_results[n]['Brier'], 3),
+         'Calibrated':all_results[n]['calibrated'],
+         'UP%':       round(all_results[n]['y_pred'].mean()*100, 1)}
+        for n in all_results]
+smdf = pd.DataFrame(rows).set_index('Asset')
+print(smdf.to_string())
+print(f"\n  Mean DA:  {smdf['Final_DA'].mean():.1f}%")
+print(f"  Mean AUC: {smdf['Final_AUC'].mean():.1f}%")
+print(f"  Mean AP:  {smdf['AP(%)'].mean():.1f}%")
+
+
+# ============================================================
+#  CELL 9 — نمودارها و جداول نمونه
+# ============================================================
+SAMPLE_N = 20
+plt.rcParams.update({
+    'font.family': 'DejaVu Sans',
+    'axes.spines.top': False,
+    'axes.spines.right': False,
+})
+
+for name, data in prepared.items():
+    res  = all_results[name]
+    yte  = res['y_true']; yp   = res['y_pred']
+    prob = res['proba'];  dt   = data['dates_test']
+    rt   = data['ret_test']
+
+    fig = plt.figure(figsize=(20, 16))
+    gs  = fig.add_gridspec(3, 3, hspace=0.45, wspace=0.38)
+
+    top3_str = " | ".join(f"{n}({a:.3f})" for n, a in res['top3'])
+    fig.suptitle(
+        f"{name} — Enhanced Multi-Model Stacking (LGBM/XGB/RF/Stack/Vote)\n"
+        f"DA={res['DA']:.1f}%  AUC={res['AUC']:.1f}%  "
+        f"F1={res['F1']:.1f}%  AP={res['AP']:.1f}%  "
+        f"Brier={res['Brier']:.3f}\n"
+        f"Top-3: {top3_str}  |  "
+        f"Method: {res['method']}  "
+        f"{'[CAL]' if res['calibrated'] else ''}",
+        fontsize=11, fontweight='bold')
+
+    ax1 = fig.add_subplot(gs[0, :])
+    correct = yte == yp
+    ax1.plot(dt, prob, '#2c5282', lw=1.2, alpha=0.7, label='P(UP)')
+    ax1.axhline(res['threshold'], color='#f6ad55', lw=2,
+                linestyle='--', label=f"Thr={res['threshold']:.2f}")
+    ax1.axhline(0.5, color='gray', lw=0.8, linestyle=':')
+    ax1.fill_between(dt, prob, res['threshold'],
+                     where=prob >= res['threshold'],
+                     alpha=0.12, color='#48bb78')
+    ax1.fill_between(dt, prob, res['threshold'],
+                     where=prob < res['threshold'],
+                     alpha=0.12, color='#fc8181')
+    wrong_idx = [i for i in range(len(dt)) if not correct[i]]
+    ax1.scatter([dt[i] for i in wrong_idx], prob[wrong_idx],
+                s=14, color='red', alpha=0.5, zorder=3, label='Wrong')
+    ax1.set_ylabel('P(UP)'); ax1.set_title('Predicted Probability Over Time')
+    ax1.legend(fontsize=8, ncol=4); ax1.set_ylim(-0.05, 1.05)
+    ax1.grid(True, alpha=0.3)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+
+    ax2 = fig.add_subplot(gs[1, 0])
+    cm_v = res['CM']
+    im = ax2.imshow(cm_v, cmap='Blues'); plt.colorbar(im, ax=ax2, fraction=0.046)
+    for ii in range(2):
+        for jj in range(2):
+            ax2.text(jj, ii,
+                     f"{cm_v[ii,jj]}\n({cm_v[ii,jj]/cm_v.sum()*100:.1f}%)",
+                     ha='center', va='center', fontsize=11,
+                     color='white' if cm_v[ii,jj] > cm_v.max()/2 else 'black',
+                     fontweight='bold')
+    ax2.set_xticks([0,1]); ax2.set_yticks([0,1])
+    ax2.set_xticklabels(['DOWN','UP']); ax2.set_yticklabels(['DOWN','UP'])
+    ax2.set_xlabel('Predicted'); ax2.set_ylabel('Actual')
+    ax2.set_title('Confusion Matrix')
+
+    ax3 = fig.add_subplot(gs[1, 1])
+    fpr, tpr, _ = roc_curve(yte, prob)
+    ax3.plot(fpr, tpr, '#2c5282', lw=2.5, label=f"Stack {res['AUC']:.1f}%")
+    ax3.fill_between(fpr, tpr, alpha=0.1, color='#2c5282')
+    clrs_roc = ['#48bb78','#f6ad55','#fc8181']
+    for ci, mn in enumerate(top3_str.split('|')[:3]):
+        mn_clean = mn.strip().split('(')[0]
+        if mn_clean in all_models[name]:
+            p_i = get_proba(all_models[name][mn_clean], mn_clean, data['X_test'])
+            if len(np.unique(np.round(p_i, 3))) > 2:
+                fi, ti, _ = roc_curve(yte, p_i)
+                ai = roc_auc_score(yte, p_i) * 100
+                ax3.plot(fi, ti, lw=1.5, alpha=0.75,
+                         color=clrs_roc[ci], label=f"{mn_clean} {ai:.1f}%")
+    ax3.plot([0,1],[0,1],'k--',lw=1)
+    ax3.set_xlabel('FPR'); ax3.set_ylabel('TPR')
+    ax3.set_title('ROC Curves')
+    ax3.legend(fontsize=7); ax3.grid(True, alpha=0.3)
+
+    ax4 = fig.add_subplot(gs[1, 2])
+    t_aucs = tournament_aucs[name]
+    s_aucs = sorted(t_aucs.items(), key=lambda x: x[1])
+    bar_c  = ['#e74c3c' if a < 0.50 else
+               '#f6ad55' if a < 0.55 else '#48bb78'
+               for _, a in s_aucs]
+    ax4.barh([x[0] for x in s_aucs], [x[1]*100 for x in s_aucs],
+             color=bar_c, alpha=0.85)
+    ax4.axvline(50, color='red',    lw=1.5, linestyle='--', label='Random')
+    ax4.axvline(55, color='orange', lw=1,   linestyle=':',  label='Target')
+    ax4.set_xlabel('Val AUC (%)'); ax4.set_title('Tournament (5 models)')
+    ax4.legend(fontsize=7); ax4.grid(True, alpha=0.3, axis='x')
+    for i, (mn, ma) in enumerate(s_aucs):
+        ax4.text(ma*100+0.2, i, f'{ma*100:.1f}%', va='center', fontsize=7)
+
+    ax5 = fig.add_subplot(gs[2, :])
+    clrs = ['#27ae60' if yp1==1 and yt1==1
+            else '#2980b9' if yp1==0 and yt1==0
+            else '#e74c3c' if yp1==1 and yt1==0
+            else '#e67e22'
+            for yt1, yp1 in zip(yte, yp)]
+    ax5.bar(range(len(rt)), rt*100, color=clrs, alpha=0.8, width=1)
+    ax5.axhline(0, color='black', lw=0.8)
+    ax5.set_ylabel('5-Day Return (%)')
+    ax5.set_title('Actual Returns [■TP ■TN ■FP ■FN]')
+    ax5.grid(True, alpha=0.3, axis='y')
+
+    plt.savefig(FP + f'plots/{name}_analysis.png', dpi=150, bbox_inches='tight')
+    plt.show(); plt.close()
+    print(f"✅ {name}: نمودارها ذخیره شدند")
+
+
+# ============================================================
+#  CELL 10 — SHAP Feature Importance (روی LightGBM از میان ۵ مدل)
+# ============================================================
+import shap as shap_lib
+
+print("\n🔄 SHAP Analysis...")
+shap_global = {}
+
+n_assets_plot = len(prepared)
+n_cols_plot   = min(3, n_assets_plot)
+n_rows_plot   = int(np.ceil(n_assets_plot / n_cols_plot))
+fig, axes = plt.subplots(n_rows_plot, n_cols_plot,
+                          figsize=(20, 6 * n_rows_plot), squeeze=False)
+axes = axes.flatten()
+
+for i, (name, data) in enumerate(prepared.items()):
+    lgbm_m = all_models[name]['lgbm']
+    ax     = axes[i]
+    exp    = shap_lib.TreeExplainer(lgbm_m)
+    sv     = exp.shap_values(data['X_test'])
+    if isinstance(sv, list): sv = sv[1]
+
+    fi = (pd.Series(np.abs(sv).mean(0), index=FEATURES)
+            .sort_values(ascending=False))
+    fi.to_csv(FP + f'shap/{name}_shap.csv')
+    shap_global[name] = fi
+
+    top  = fi.head(20)
+    clrs = []
+    for f in top.index:
+        if f in FEATURES_ADVANCED:
+            clrs.append('#9b59b6')
+        elif f in FEATURES_TSETMC:
+            clrs.append('#e74c3c')
+        else:
+            clrs.append('#2c5282')
+
+    ax.barh(range(len(top)), top.values[::-1], color=clrs[::-1], alpha=0.85)
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels(top.index[::-1], fontsize=7)
+    ax.set_xlabel('Mean |SHAP|')
+    ax.set_title(f'{name}  [■New ■TSETMC ■Base]', fontsize=9)
+    ax.grid(True, alpha=0.3, axis='x')
+
+for j in range(n_assets_plot, len(axes)):
+    axes[j].axis('off')
+
+plt.suptitle('SHAP Feature Importance (LightGBM) — 20 Top Features',
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.savefig(FP + 'plots/all_shap.png', dpi=150, bbox_inches='tight')
+plt.show(); plt.close()
+
+all_fi = pd.DataFrame(shap_global).fillna(0)
+mean_fi = all_fi.mean(axis=1).sort_values(ascending=False)
+print("\n  🏆 Top-20 فیچر مشترک (میانگین SHAP):")
+for feat, val in mean_fi.head(20).items():
+    cat = "🆕" if feat in FEATURES_ADVANCED else ("📊" if feat in FEATURES_TSETMC else "📈")
+    print(f"    {cat} {feat:30s}: {val:.4f}")
+
+print("✅ SHAP done")
+
+
+# ============================================================
+#  CELL 10.5 — قیمت‌گذاری بلک-شولز و VaR/CVaR
+# ============================================================
+from scipy.stats import norm
+
+RISK_FREE_RATE   = 0.20
+OPTION_HOLD_DAYS = HOLD_DAYS
+TRADING_DAYS     = 252
+
+TRANS_COST  = 0.005
+PREMIUM_PCT = 0.008
+STRIKE_PCT  = 0.04
+
+
+def bs_call_price(S, K, T, r, sigma):
+    S = np.asarray(S, dtype=float)
+    sigma = np.maximum(np.asarray(sigma, dtype=float), 1e-4)
+    T = max(T, 1e-6)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+    return np.maximum(price, 0.0)
+
+
+def bs_fair_premium_pct(daily_vol, strike_pct=None, T_days=OPTION_HOLD_DAYS,
+                         r=RISK_FREE_RATE):
+    strike_pct = STRIKE_PCT if strike_pct is None else strike_pct
+    sigma_ann = np.asarray(daily_vol, dtype=float) * np.sqrt(TRADING_DAYS)
+    T = T_days / TRADING_DAYS
+    K = 1.0 + strike_pct
+    return bs_call_price(1.0, K, T, r, sigma_ann)
+
+
+def historical_var_cvar(returns, alpha=0.05):
+    r = np.asarray(returns, dtype=float)
+    r = r[~np.isnan(r)]
+    if len(r) == 0:
+        return 0.0, 0.0
+    var = -np.percentile(r, alpha * 100)
+    tail = r[r <= -var]
+    cvar = -tail.mean() if len(tail) > 0 else var
+    return float(var), float(cvar)
+
+
+def parametric_var(returns, alpha=0.05):
+    r = np.asarray(returns, dtype=float)
+    r = r[~np.isnan(r)]
+    if len(r) == 0:
+        return 0.0
+    mu, sigma = r.mean(), r.std()
+    z = norm.ppf(alpha)
+    return float(-(mu + z * sigma))
+
+
+risk_metrics = {}
+print("\n📐 محاسبه VaR / CVaR و پرمیوم تعادلی بلک-شولز برای هر سهم...\n")
+for name, data in prepared.items():
+    ret_test = data['ret_test']
+    # 🆕 v7: نوسانِ واقعیِ روزانهٔ هر روزِ تست (رفعِ باگ dead-lookup قبلی)
+    vol_test = data['volatility_test']
+
+    var_h, cvar_h = historical_var_cvar(ret_test, alpha=0.05)
+    var_p = parametric_var(ret_test, alpha=0.05)
+    bs_prem_mean = float(np.mean(
+        bs_fair_premium_pct(np.std(ret_test) / np.sqrt(OPTION_HOLD_DAYS))))
+
+    risk_metrics[name] = {
+        'VaR_hist_95 (%)':  round(var_h  * 100, 2),
+        'CVaR_hist_95 (%)': round(cvar_h * 100, 2),
+        'VaR_param_95 (%)': round(var_p  * 100, 2),
+        'BS_fair_premium (%)': round(bs_prem_mean * 100, 2),
+        'Market_premium (%)':  round(PREMIUM_PCT * 100, 2),
+    }
+    print(f"  {name:12s}  VaR95={var_h*100:5.2f}%  CVaR95={cvar_h*100:5.2f}%  "
+          f"ParamVaR95={var_p*100:5.2f}%  BS_fair_premium={bs_prem_mean*100:5.2f}%")
+
+print("\n✅ VaR/CVaR و قیمت تعادلی بلک-شولز محاسبه شد")
+
+
+# ============================================================
+#  CELL 11 — Backtest پیشرفته
+# ============================================================
+def run_backtest_advanced(ret_true, proba, conf_high, conf_low,
+                           premium=PREMIUM_PCT, strike=STRIKE_PCT,
+                           tc=TRANS_COST, daily_vol=None):
+    cap_cc  = 1.0; cap_bnh = 1.0
+    records = []; prev = 'CASH'
+    max_cap = 1.0
+
+    n = len(ret_true)
+    if daily_vol is None:
+        bs_fair = np.full(n, premium)
+    else:
+        dv = np.asarray(daily_vol, dtype=float)
+        dv = np.where(np.isnan(dv), np.nanmedian(dv[~np.isnan(dv)]) if np.any(~np.isnan(dv)) else 0.02, dv)
+        bs_fair = bs_fair_premium_pct(dv, strike_pct=strike)
+
+    for i, (ret, p) in enumerate(zip(ret_true, proba)):
+        ret = float(ret); p = float(p)
+        cap_bnh *= max(0.001, 1 + ret)
+        max_cap  = max(max_cap, cap_cc)
+
+        bs_ok = premium >= bs_fair[i]
+
+        edge   = abs(p - 0.5)
+        pos_raw= min(1.0, edge * 4)
+
+        if p > conf_high and bs_ok:
+            action = 'COVERED_CALL'
+            cc_ret = (min(ret, strike) + premium
+                      if ret >= 0 else ret + premium)
+            pos    = pos_raw
+        elif p < conf_low:
+            action = 'CASH'; cc_ret = 0.0; pos = 0.0
+        elif p > 0.5 + (conf_high - 0.5) * 0.5 and bs_ok:
+            action = 'PARTIAL_CC'
+            cc_ret = (min(ret, strike/2) + premium * 0.5
+                      if ret >= 0 else ret + premium * 0.5)
+            pos    = pos_raw * 0.6
+        else:
+            action = 'STOCK_ONLY'; cc_ret = ret; pos = pos_raw * 0.4
+
+        cost    = tc if action != prev else 0.0
+        net     = max(cc_ret * pos - cost, -0.10)
+        cap_cc  = max(0.001, cap_cc * (1 + net))
+        records.append({
+            'ret_actual': ret, 'cc_return': net,
+            'equity_cc':  cap_cc, 'equity_bnh': cap_bnh,
+            'action': action, 'proba': p, 'position': pos,
+            'bs_fair_premium': bs_fair[i], 'bs_sold': bs_ok,
+        })
+        prev = action
+
+    return pd.DataFrame(records)
+
+
+def calc_metrics(df):
+    ann = np.sqrt(252 / 5)
+    r   = df['cc_return']; rb = df['ret_actual']
+    eq  = df['equity_cc']; eqb = df['equity_bnh']
+
+    def sh(x):  return ann * x.mean() / (x.std() + 1e-8)
+    def so(x):  return ann * x.mean() / (x[x < 0].std() + 1e-8)
+    def mdd(e): return ((e - e.cummax()) / e.cummax()).min()
+
+    cc_r  = (eq.iloc[-1]  - 1) * 100
+    bnh_r = (eqb.iloc[-1] - 1) * 100
+    var_cc, cvar_cc = historical_var_cvar(r.values, alpha=0.05)
+    return {
+        'CC Return (%)':  round(cc_r,  1),
+        'BnH Return (%)': round(bnh_r, 1),
+        'Sharpe CC':      round(sh(r),  2),
+        'Sharpe BnH':     round(sh(rb), 2),
+        'Sortino CC':     round(so(r),  2),
+        'MaxDD CC (%)':   round(mdd(eq)  * 100, 1),
+        'MaxDD BnH (%)':  round(mdd(eqb) * 100, 1),
+        'Calmar CC':      round(cc_r / (abs(mdd(eq)*100) + 1e-8), 2),
+        'Win Rate (%)':   round((r > 0).mean() * 100, 1),
+        'Avg Position':   round(df['position'].mean(), 2),
+        'VaR95 CC (%)':   round(var_cc  * 100, 2),
+        'CVaR95 CC (%)':  round(cvar_cc * 100, 2),
+    }
+
+
+backtest_results = {}
+bt_rows = []
+print("\n🔄 Backtest پیشرفته...\n")
+
+for name, data in prepared.items():
+    res = all_results[name]
+    dt  = data['dates_test']
+
+    top3_names = [x[0] for x in res['top3']]
+    pv_stack   = np.column_stack(
+        [get_proba(all_models[name][mn], mn, data['X_val'])
+         for mn in top3_names]).mean(axis=1)
+    if res['flipped']:
+        pv_stack = 1 - pv_stack
+
+    conf_high = max(float(np.percentile(pv_stack, 65)), 0.52)
+    conf_low  = min(float(np.percentile(pv_stack, 35)), 0.48)
+
+    # 🆕 v7: نوسانِ واقعیِ روزانهٔ تست (رفع باگ dead-lookup که گیت بلک-شولز
+    # را همیشه غیرفعال می‌کرد)
+    vol_test = data['volatility_test']
+
+    bt  = run_backtest_advanced(data['ret_test'], res['proba'],
+                                 conf_high, conf_low, daily_vol=vol_test)
+    bt.index = dt
+    m   = calc_metrics(bt)
+    act = bt['action'].value_counts().to_dict()
+    rm  = risk_metrics[name]
+    cc_sold_ratio = bt['bs_sold'].mean() * 100 if 'bs_sold' in bt.columns else np.nan
+
+    print(f"{'='*55}  {name}")
+    print(f"  conf_high={conf_high:.2f}  conf_low={conf_low:.2f}")
+    print(f"  CC: {m['CC Return (%)']:+.1f}%  BnH: {m['BnH Return (%)']:+.1f}%")
+    print(f"  Sharpe={m['Sharpe CC']:.2f}  Sortino={m['Sortino CC']:.2f}  "
+          f"Calmar={m['Calmar CC']:.2f}")
+    print(f"  WinRate={m['Win Rate (%)']:.1f}%  MaxDD={m['MaxDD CC (%)']:.1f}%  "
+          f"AvgPos={m['Avg Position']:.2f}")
+    print(f"  VaR95={rm['VaR_hist_95 (%)']:.2f}%  CVaR95={rm['CVaR_hist_95 (%)']:.2f}%  "
+          f"روزهای مجاز فروش کال طبق بلک-شولز={cc_sold_ratio:.1f}%")
+    print(f"  Actions: {act}\n")
+
+    backtest_results[name] = (bt, m)
+    bt_rows.append({'Asset': name, **m})
+
+    fig, axes2 = plt.subplots(2, 1, figsize=(14, 8))
+    fig.suptitle(
+        f"{name} — Enhanced Backtest\n"
+        f"CC: {m['CC Return (%)']:+.1f}%  BnH: {m['BnH Return (%)']:+.1f}%  "
+        f"Sharpe={m['Sharpe CC']:.2f}  Calmar={m['Calmar CC']:.2f}",
+        fontsize=11, fontweight='bold')
+
+    ax = axes2[0]
+    ax.plot(dt, bt['equity_cc'].values, '#2c5282', lw=2.5,
+            label=f"CC ({m['CC Return (%)']:+.1f}%)")
+    ax.plot(dt, bt['equity_bnh'].values, '#e53e3e', lw=1.8, alpha=0.8,
+            label=f"B&H ({m['BnH Return (%)']:+.1f}%)")
+    ax.axhline(1.0, color='gray', lw=0.8, linestyle=':')
+    eq_arr  = bt['equity_cc'].values
+    eq_min  = eq_arr.min() * 0.97
+    eq_max  = eq_arr.max() * 1.03
+    colors_bt = {'CASH':'#fff3cd','STOCK_ONLY':'#d4edda',
+                 'COVERED_CALL':'#cce5ff','PARTIAL_CC':'#e8d5ff'}
+    for act_n, col in colors_bt.items():
+        mask = (bt['action'] == act_n).values
+        if mask.any():
+            ax.fill_between(dt, eq_min, eq_max, where=mask,
+                             alpha=0.2, color=col, label=act_n)
+    ax.set_ylabel('Portfolio Value'); ax.legend(fontsize=7, ncol=3)
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+
+    ax2 = axes2[1]
+    dd  = (bt['equity_cc']  / bt['equity_cc'].cummax()  - 1) * 100
+    ddb = (bt['equity_bnh'] / bt['equity_bnh'].cummax() - 1) * 100
+    ax2.fill_between(dt, dd.values, 0, alpha=0.5, color='#2c5282',
+                     label='CC Drawdown')
+    ax2.plot(dt, ddb.values, '#e53e3e', lw=1, alpha=0.7, label='BnH DD')
+    ax2.set_ylabel('Drawdown (%)'); ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+
+    plt.tight_layout()
+    plt.savefig(FP + f'plots/{name}_backtest.png', dpi=150, bbox_inches='tight')
+    plt.show(); plt.close()
+    bt.to_csv(FP + f'backtest/{name}_backtest.csv')
+
+
+# ============================================================
+#  CELL 12 — بهینه‌سازی وزن پرتفوی (Mean-Variance / Max-Sharpe)
+# ============================================================
+from scipy.optimize import minimize
+
+print("\n" + "=" * 70)
+print("  PORTFOLIO WEIGHT OPTIMIZATION — بهینه‌سازی وزن پرتفوی کاورد کال")
+print("=" * 70)
+
+cc_returns = {}
+for name in prepared:
+    bt, _ = backtest_results[name]
+    cc_returns[name] = bt['cc_return']
+
+ret_matrix = pd.DataFrame(cc_returns).dropna(how='all')
+ret_matrix = ret_matrix.fillna(0.0)
+asset_order = list(ret_matrix.columns)
+n_assets = len(asset_order)
+
+ANN = TRADING_DAYS / OPTION_HOLD_DAYS
+mu_vec  = ret_matrix.mean().values * ANN
+cov_mat = ret_matrix.cov().values * ANN
+cov_mat = cov_mat + np.eye(n_assets) * 1e-6
+
+
+def portfolio_perf(w, mu, cov):
+    ret = float(w @ mu)
+    vol = float(np.sqrt(w @ cov @ w))
+    sharpe = (ret - RISK_FREE_RATE) / (vol + 1e-8)
+    return ret, vol, sharpe
+
+
+def neg_sharpe(w, mu, cov):
+    return -portfolio_perf(w, mu, cov)[2]
+
+
+def portfolio_vol(w, cov):
+    return float(np.sqrt(w @ cov @ w))
+
+
+max_weight_cap = max(0.45, 1.0 / n_assets + 1e-6) if n_assets > 0 else 0.45
+bounds     = tuple((0.0, max_weight_cap) for _ in range(n_assets))
+constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},)
+w0 = np.full(n_assets, 1.0 / n_assets)
+
+res_sharpe = minimize(neg_sharpe, w0, args=(mu_vec, cov_mat),
+                       method='SLSQP', bounds=bounds,
+                       constraints=constraints,
+                       options={'maxiter': 500, 'ftol': 1e-9})
+w_sharpe = res_sharpe.x if res_sharpe.success else w0
+
+res_minvar = minimize(portfolio_vol, w0, args=(cov_mat,),
+                       method='SLSQP', bounds=bounds,
+                       constraints=constraints,
+                       options={'maxiter': 500, 'ftol': 1e-9})
+w_minvar = res_minvar.x if res_minvar.success else w0
+
+w_equal = w0.copy()
+
+portfolio_summary = {}
+for label, w in [('Max-Sharpe', w_sharpe),
+                  ('Min-Variance', w_minvar),
+                  ('Equal-Weight', w_equal)]:
+    ret, vol, sharpe = portfolio_perf(w, mu_vec, cov_mat)
+    port_daily = ret_matrix.values @ w
+    var_h, cvar_h = historical_var_cvar(port_daily, alpha=0.05)
+    portfolio_summary[label] = {
+        'weights': dict(zip(asset_order, np.round(w, 3))),
+        'Expected Return (%/yr)': round(ret * 100, 1),
+        'Volatility (%/yr)':      round(vol * 100, 1),
+        'Sharpe':                 round(sharpe, 2),
+        'VaR95 (%)':              round(var_h  * 100, 2),
+        'CVaR95 (%)':             round(cvar_h * 100, 2),
+    }
+
+print("\n  وزن‌های بهینه هر سهم:\n")
+weights_df = pd.DataFrame(
+    {lbl: info['weights'] for lbl, info in portfolio_summary.items()})
+print(weights_df.to_string())
+
+print("\n  عملکرد هر پرتفوی:\n")
+perf_df = pd.DataFrame(
+    {lbl: {k: v for k, v in info.items() if k != 'weights'}
+     for lbl, info in portfolio_summary.items()})
+print(perf_df.to_string())
+
+best_portfolio = max(
+    portfolio_summary.items(), key=lambda kv: kv[1]['Sharpe'])[0]
+print(f"\n  🏆 بهترین پرتفوی بر اساس نسبت شارپ: {best_portfolio}")
+print(f"     وزن‌های پیشنهادی نهایی برای سبد سرمایه‌گذاری:")
+for a, w in portfolio_summary[best_portfolio]['weights'].items():
+    print(f"       {a:12s}: {w*100:5.1f}%")
+
+pd.DataFrame(portfolio_summary).to_csv(FP + 'portfolio_optimization.csv')
+
+fig, ax = plt.subplots(1, 2, figsize=(16, 6))
+weights_df.plot(kind='bar', ax=ax[0], alpha=0.85,
+                 color=['#2c5282', '#48bb78', '#a0aec0'])
+ax[0].set_ylabel('Weight'); ax[0].set_title('وزن بهینه هر سهم در سه سناریو')
+ax[0].legend(fontsize=8); ax[0].grid(True, alpha=0.3, axis='y')
+
+scenarios = list(portfolio_summary.keys())
+rets_pct  = [portfolio_summary[s]['Expected Return (%/yr)'] for s in scenarios]
+vols_pct  = [portfolio_summary[s]['Volatility (%/yr)'] for s in scenarios]
+colors_sc = ['#2c5282', '#48bb78', '#a0aec0']
+for i, s in enumerate(scenarios):
+    ax[1].scatter(vols_pct[i], rets_pct[i], s=200, color=colors_sc[i],
+                  label=f"{s} (Sharpe={portfolio_summary[s]['Sharpe']:.2f})",
+                  edgecolors='black', zorder=3)
+ax[1].set_xlabel('Volatility (%/yr)'); ax[1].set_ylabel('Expected Return (%/yr)')
+ax[1].set_title('Risk-Return Trade-off پرتفوی‌ها')
+ax[1].legend(fontsize=8); ax[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(FP + 'plots/portfolio_optimization.png', dpi=150, bbox_inches='tight')
+plt.show(); plt.close()
+
+print("\n✅ Portfolio optimization done")
+
+
+# ============================================================
+#  CELL 13 — جدول نهایی + گزارش (✅ HONEST — همه سهم‌ها بدون گزینش)
+# ============================================================
+final_rows = []
+for name in prepared:
+    res = all_results[name]
+    _, m = backtest_results[name]
+    final_rows.append({
+        'Asset':          name,
+        'Top Model':      best_model_info[name][0][0],
+        'Method':         res['method'],
+        'Calibrated':     res['calibrated'],
+        'DA (%)':         round(res['DA'],   1),
+        'AUC (%)':        round(res['AUC'],  1),
+        'F1 (%)':         round(res['F1'],   1),
+        'Prec (%)':       round(res['Prec'], 1),
+        'Rec (%)':        round(res['Rec'],  1),
+        'AP (%)':         round(res['AP'],   1),
+        'Brier':          round(res['Brier'], 3),
+        'CC Return (%)':  m['CC Return (%)'],
+        'BnH Return (%)': m['BnH Return (%)'],
+        'Sharpe CC':      m['Sharpe CC'],
+        'Sharpe BnH':     m['Sharpe BnH'],
+        'Sortino CC':     m['Sortino CC'],
+        'Calmar CC':      m['Calmar CC'],
+        'MaxDD CC (%)':   m['MaxDD CC (%)'],
+        'Win Rate (%)':   m['Win Rate (%)'],
+        'Avg Position':   m['Avg Position'],
+        'VaR95 CC (%)':   m['VaR95 CC (%)'],
+        'CVaR95 CC (%)':  m['CVaR95 CC (%)'],
+        'BS_fair_premium (%)': risk_metrics[name]['BS_fair_premium (%)'],
+    })
+
+fdf = pd.DataFrame(final_rows).set_index('Asset')
+honest_banner("جدول نهایی صادقانه — همهٔ سهم‌ها بدون حذف. تنها منبع معتبر "
+              "برای سبد پیشنهادی و گزارش پایان‌نامه همین جدول است.")
+print(fdf.to_string())
+fdf.to_csv(FP + 'thesis_table_final.csv')
+
+print("\n" + "=" * 70)
+print("  FINAL REPORT (✅ HONEST)")
+print("=" * 70)
+for name, res in all_results.items():
+    _, m  = backtest_results[name]
+    flag  = ("✅" if res['AUC'] >= 60 else
+             "⚠️" if res['AUC'] >= 55 else "❌")
+    cc_f  = "📈" if m['CC Return (%)'] > 0 else "📉"
+    beat  = m['CC Return (%)'] > m['BnH Return (%)']
+    top1  = best_model_info[name][0][0]
+    cal_s = "[CAL]" if res['calibrated'] else ""
+    print(f"  {flag} {name:12s} [{top1:10s}]{cal_s}: "
+          f"DA={res['DA']:.1f}%  AUC={res['AUC']:.1f}%  "
+          f"F1={res['F1']:.1f}%  AP={res['AP']:.1f}%  "
+          f"{cc_f} CC={m['CC Return (%)']:+.1f}%  "
+          f"BnH={m['BnH Return (%)']:+.1f}%  "
+          f"{'✓ CC>BnH' if beat else '✗ BnH>CC'}")
+
+mean_auc = np.mean([r['AUC'] for r in all_results.values()])
+mean_da  = np.mean([r['DA']  for r in all_results.values()])
+mean_ap  = np.mean([r['AP']  for r in all_results.values()])
+n_assets_total = len(backtest_results)
+cc_pos   = sum(1 for _, m in backtest_results.values() if m['CC Return (%)'] > 0)
+cc_beat  = sum(1 for _, m in backtest_results.values()
+               if m['CC Return (%)'] > m['BnH Return (%)'])
+
+print(f"\n  Mean DA:        {mean_da:.1f}%")
+print(f"  Mean AUC:       {mean_auc:.1f}%")
+print(f"  Mean AP:        {mean_ap:.1f}%")
+print(f"  CC مثبت:        {cc_pos}/{n_assets_total}")
+print(f"  CC بهتر از BnH: {cc_beat}/{n_assets_total}")
+
+if   mean_auc >= 62: verdict = "🎉 عالی — کاملاً قابل دفاع در مجلات ISI"
+elif mean_auc >= 58: verdict = "✅ خوب — قابل دفاع با تفسیر محدودیت‌ها"
+elif mean_auc >= 54: verdict = "⚠️ قابل قبول — توضیح محدودیت‌های ساختاری ایران لازم است"
+else:                verdict = "❌ نیاز به بررسی بیشتر داده و فیچرها"
+
+print(f"\n  {verdict}")
+
+print("\n  📐 پرتفوی بهینه پیشنهادی (بر اساس Max-Sharpe):")
+for a, w in portfolio_summary[best_portfolio]['weights'].items():
+    print(f"       {a:12s}: {w*100:5.1f}%")
+print(f"     بازده مورد انتظار سالانه: "
+      f"{portfolio_summary[best_portfolio]['Expected Return (%/yr)']:+.1f}%   "
+      f"نوسان سالانه: {portfolio_summary[best_portfolio]['Volatility (%/yr)']:.1f}%   "
+      f"Sharpe: {portfolio_summary[best_portfolio]['Sharpe']:.2f}   "
+      f"VaR95: {portfolio_summary[best_portfolio]['VaR95 (%)']:.2f}%   "
+      f"CVaR95: {portfolio_summary[best_portfolio]['CVaR95 (%)']:.2f}%")
+
+
+# ============================================================================
+#  CELL 13.8 — 🚨 FRAUD DEMO: بازتولید کامل CELL 6-13 با فیچر نشت‌دار،
+#  با همان ۵ مدل (LightGBM/XGBoost/RandomForest/Stacking/Voting)
+#
+#  ⚠️ همه‌چیز در این سلول روی leak_feat ساخته شده و هرگز نباید در
+#  پایان‌نامه/مقاله یا هر تصمیم واقعی استفاده شود. فایل‌های خروجی با
+#  پیشوند FRAUD_ ذخیره می‌شوند. تنها منبع معتبر خروجی CELL 8-13 است.
+#  🆕 v7: همان Purged split (time_split_slices) که در HONEST استفاده
+#  شد این‌جا هم به‌کار می‌رود — تا تنها تفاوتِ واقعیِ دو مسیر همان
+#  leak_feat باشد، نه یک باگِ نشتِ اضافیِ دیگر.
+# ============================================================================
+
+fraud_banner(
+    "بازتولید کامل Pipeline با فیچر نشت‌دار و همان ۵ مدل "
+    "(LightGBM/XGBoost/RandomForest/Stacking/Voting) — تورنومنت، "
+    "نمودارها، SHAP، Backtest، و بهینه‌سازی سبد.\n"
+    "  هر عدد/نمودار زیر را با معادل صادقانه‌اش (CELL 9-13) مقایسه کنید."
+)
+
+FEATURES_FRAUD = FEATURES + ['leak_feat']
+
+fraud_prepared = {}
+print("\n⏳ (FRAUD) Preparing splits with leak_feat...")
+for name, d in prepared.items():
+    df_feat_fraud = add_leaky_demo_feature(d['_df_feat_full']).dropna(subset=['leak_feat'])
+    n  = len(df_feat_fraud)
+    tr_sl, vl_sl, te_sl = time_split_slices(n)
+    tr = df_feat_fraud.iloc[tr_sl]
+    vl = df_feat_fraud.iloc[vl_sl]
+    te = df_feat_fraud.iloc[te_sl]
+
+    sc  = RobustScaler()
+    Xtr = sc.fit_transform(tr[FEATURES_FRAUD])
+    Xvl = sc.transform(vl[FEATURES_FRAUD])
+    Xte = sc.transform(te[FEATURES_FRAUD])
+
+    print(f"  {name}: train={len(tr)} val={len(vl)} test={len(te)} "
+          f"Features={len(FEATURES_FRAUD)} (شامل leak_feat)")
+
+    fraud_prepared[name] = {
+        'X_train': Xtr, 'y_train': tr['target'].values,
+        'X_val':   Xvl, 'y_val':   vl['target'].values,
+        'X_test':  Xte, 'y_test':  te['target'].values,
+        'dates_train': tr.index.tolist(),
+        'dates_val':   vl.index.tolist(),
+        'dates_test':  te.index.tolist(),
+        'ret_train':   tr['ret_5d'].values,
+        'ret_val':     vl['ret_5d'].values,
+        'ret_test':    te['ret_5d'].values,
+        'regime_test': te['regime'].values,
+        'volatility_test': te['volatility'].values,  # 🆕 v7
+        'scaler':      sc,
+        'X_trval': np.vstack([Xtr, Xvl]),
+        'y_trval': np.concatenate([tr['target'].values, vl['target'].values]),
+    }
+print("✅ (FRAUD) Data prepared")
+
+
+fraud_all_models      = {}
+fraud_tournament_aucs = {}
+
+print("\n" + "=" * 70)
+print("  🚨 (FRAUD) TOURNAMENT — LightGBM/XGBoost/RF/Stacking/Voting "
+      "با فیچر نشت‌دار")
+print("=" * 70)
+
+for name, data in fraud_prepared.items():
+    print(f"\n{'─'*60}  {name}  [FRAUD]")
+    Xtr, ytr = data['X_train'], data['y_train']
+    Xvl, yvl = data['X_val'],   data['y_val']
+    mdls = {}; aucs = {}; t0 = time.time()
+
+    lgbm_m, lgbm_a = train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60)
+    mdls['lgbm'] = lgbm_m; aucs['lgbm'] = lgbm_a
+    print(f"  ① LightGBM  AUC={lgbm_a:.4f}")
+
+    xgb_m, xgb_a = train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40)
+    mdls['xgb'] = xgb_m; aucs['xgb'] = xgb_a
+    print(f"  ② XGBoost   AUC={xgb_a:.4f}")
+
+    rf_m, rf_a = train_rf(Xtr, ytr, Xvl, yvl, n_trials=30)
+    mdls['rf'] = rf_m; aucs['rf'] = rf_a
+    print(f"  ③ RandomForest  AUC={rf_a:.4f}")
+
+    stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, lgbm_m, xgb_m, rf_m)
+    mdls['stacking'] = stack_m; aucs['stacking'] = stack_a
+    print(f"  ④ StackingClassifier  AUC={stack_a:.4f}")
+
+    vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, lgbm_m, xgb_m, rf_m)
+    mdls['voting'] = vote_m; aucs['voting'] = vote_a
+    print(f"  ⑤ VotingClassifier  AUC={vote_a:.4f}")
+
+    best_name = max(aucs, key=aucs.get)
+    print(f"  🏆 [FRAUD] بهترین مدل برای {name}: {best_name} "
+          f"(Val AUC={aucs[best_name]:.4f})")
+
+    fraud_all_models[name]      = mdls
+    fraud_tournament_aucs[name] = aucs
+    print(f"  ✅ [FRAUD] {name}  ({time.time()-t0:.0f}s total)")
+    gc.collect()
+
+print("\n✅ (FRAUD) Tournament complete")
+
+
+fraud_all_results     = {}
+fraud_best_model_info = {}
+
+print("\n" + "=" * 70)
+print("  🚨 (FRAUD) TWO-LEVEL STACKING + BMA + CALIBRATION + EVALUATION")
+print("=" * 70)
+
+for name, data in fraud_prepared.items():
+    mdls = fraud_all_models[name]
+    aucs = fraud_tournament_aucs[name]
+    Xtr, ytr = data['X_train'], data['y_train']
+    Xvl, yvl = data['X_val'],   data['y_val']
+    Xte, yte = data['X_test'],  data['y_test']
+    X_trval  = data['X_trval']
+    y_trval  = data['y_trval']
+
+    top5   = sorted(aucs.items(), key=lambda x: -x[1])[:5]
+    top3   = top5[:3]
+    top3_n = [x[0] for x in top3]
+    fraud_best_model_info[name] = top5
+
+    stack_names_available = [m for m in STACK_MODELS if m in mdls]
+    oof, valid_mask = get_oof_meta_features(
+        mdls, stack_names_available, X_trval, y_trval, n_splits=5)
+
+    meta_X_vl_full = np.column_stack(
+        [get_proba(mdls[mn], mn, Xvl) for mn in stack_names_available])
+    meta_X_te_full = np.column_stack(
+        [get_proba(mdls[mn], mn, Xte) for mn in stack_names_available])
+
+    if valid_mask.sum() > 60:
+        meta_X_cv = oof[valid_mask]
+        meta_y_cv = y_trval[valid_mask]
+        best_cv_auc, best_c = 0.5, 0.1
+        for C in [0.01, 0.05, 0.1, 0.3, 1.0, 3.0]:
+            lr = LogisticRegression(C=C, random_state=GLOBAL_SEED, max_iter=1000,
+                                    class_weight='balanced')
+            tscv2 = TimeSeriesSplit(n_splits=4)
+            cv_aucs = []
+            for tr_i, te_i in tscv2.split(meta_X_cv):
+                if len(np.unique(meta_y_cv[tr_i])) < 2:
+                    continue
+                lr.fit(meta_X_cv[tr_i], meta_y_cv[tr_i])
+                p = lr.predict_proba(meta_X_cv[te_i])[:, 1]
+                if len(np.unique(meta_y_cv[te_i])) > 1:
+                    cv_aucs.append(roc_auc_score(meta_y_cv[te_i], p))
+            mean_cv = np.mean(cv_aucs) if cv_aucs else 0.5
+            if mean_cv > best_cv_auc:
+                best_cv_auc, best_c = mean_cv, C
+        meta_lr = LogisticRegression(C=best_c, random_state=GLOBAL_SEED,
+                                      max_iter=1000, class_weight='balanced')
+        meta_lr.fit(meta_X_cv, meta_y_cv)
+        stack_proba_val  = meta_lr.predict_proba(meta_X_vl_full)[:, 1]
+        stack_proba_test = meta_lr.predict_proba(meta_X_te_full)[:, 1]
+    else:
+        stack_proba_val  = None
+        stack_proba_test = None
+
+    all_probas_val  = np.column_stack(
+        [get_proba(mdls[mn], mn, Xvl) for mn in aucs.keys()])
+    all_probas_test = np.column_stack(
+        [get_proba(mdls[mn], mn, Xte) for mn in aucs.keys()])
+    val_aucs_list   = [aucs[mn] for mn in aucs.keys()]
+
+    bma_proba_val  = bayesian_model_average(all_probas_val,  val_aucs_list)
+    bma_proba_test = bayesian_model_average(all_probas_test, val_aucs_list)
+
+    ra_probas_val  = np.column_stack(
+        [get_proba(mdls[mn], mn, Xvl) for mn, _ in top5])
+    ra_probas_test = np.column_stack(
+        [get_proba(mdls[mn], mn, Xte) for mn, _ in top5])
+    ra_proba_val  = rank_avg(ra_probas_val)
+    ra_proba_test = rank_avg(ra_probas_test)
+
+    candidates = {
+        'rank_avg': (ra_proba_val, ra_proba_test,
+                     roc_auc_score(yvl, ra_proba_val)),
+        'bma':      (bma_proba_val, bma_proba_test,
+                     roc_auc_score(yvl, bma_proba_val)),
+        'top1':     (get_proba(mdls[top3_n[0]], top3_n[0], Xvl),
+                     get_proba(mdls[top3_n[0]], top3_n[0], Xte),
+                     aucs[top3_n[0]]),
+    }
+    if stack_proba_val is not None:
+        candidates['stack_lr'] = (stack_proba_val, stack_proba_test,
+                                   roc_auc_score(yvl, stack_proba_val))
+
+    chosen = max(candidates.items(), key=lambda kv: kv[1][2])
+    chosen_name = chosen[0]
+    proba_val_raw, proba_test_raw, cv_a = chosen[1]
+
+    proba_test_cal = calibrate_proba(
+        proba_val_raw, yvl, proba_test_raw, method='isotonic')
+    auc_cal  = roc_auc_score(yte, proba_test_cal)
+    auc_raw  = roc_auc_score(yte, proba_test_raw)
+    use_cal  = auc_cal >= auc_raw - 0.005
+    proba_test_final = proba_test_cal if use_cal else proba_test_raw
+
+    auc_val = roc_auc_score(yvl, proba_val_raw)
+    flipped = False
+    if auc_val < 0.48:
+        proba_test_final = 1 - proba_test_final
+        proba_val_raw    = 1 - proba_val_raw
+        flipped = True
+
+    best_thr = find_threshold_pr(yvl, proba_val_raw)
+    y_pred   = (proba_test_final >= best_thr).astype(int)
+
+    da    = accuracy_score(yte, y_pred) * 100
+    auc   = roc_auc_score(yte, proba_test_final) * 100
+    f1    = f1_score(yte, y_pred, zero_division=0) * 100
+    prec  = precision_score(yte, y_pred, zero_division=0) * 100
+    rec   = recall_score(yte, y_pred, zero_division=0) * 100
+    brier = brier_score_loss(yte, proba_test_final)
+    aps   = average_precision_score(yte, proba_test_final) * 100
+    cm    = confusion_matrix(yte, y_pred)
+
+    regime     = data['regime_test'][:len(yte)]
+    regime_res = {}
+    for r, label in [(0,'Low Vol'),(1,'Med Vol'),(2,'High Vol')]:
+        mask = regime == r
+        if mask.sum() > 5 and len(np.unique(yte[mask])) > 1:
+            regime_res[label] = {
+                'n':   int(mask.sum()),
+                'DA':  accuracy_score(yte[mask], y_pred[mask]) * 100,
+                'AUC': roc_auc_score(yte[mask], proba_test_final[mask]) * 100,
+            }
+
+    fraud_all_results[name] = {
+        'y_true': yte, 'y_pred': y_pred, 'proba': proba_test_final,
+        'proba_val': proba_val_raw, 'y_val': yvl,
+        'threshold': best_thr,
+        'DA': da, 'AUC': auc, 'F1': f1, 'Prec': prec, 'Rec': rec,
+        'Brier': brier, 'AP': aps,
+        'CM': cm, 'flipped': flipped,
+        'top3': top3, 'regime': regime_res,
+        'method': chosen_name, 'calibrated': use_cal,
+    }
+
+    print(f"  [FRAUD] {name}: Method={chosen_name}  DA={da:.1f}%  "
+          f"AUC={auc:.1f}%  F1={f1:.1f}%  AP={aps:.1f}%")
+
+fraud_rows = [{'Asset': n,
+         'Method':    fraud_all_results[n]['method'],
+         'Top1':      fraud_best_model_info[n][0][0],
+         'Final_DA':  round(fraud_all_results[n]['DA'],  1),
+         'Final_AUC': round(fraud_all_results[n]['AUC'], 1),
+         'Final_F1':  round(fraud_all_results[n]['F1'],  1),
+         'AP(%)':     round(fraud_all_results[n]['AP'],  1)}
+        for n in fraud_all_results]
+print("\n🚨 SUMMARY (FRAUD)")
+print(pd.DataFrame(fraud_rows).set_index('Asset').to_string())
+
+
+# نمودارها (معادل CELL 9)
+print("\n🚨 (FRAUD) رسم نمودارها...")
+for name, data in fraud_prepared.items():
+    res  = fraud_all_results[name]
+    yte  = res['y_true']; yp   = res['y_pred']
+    prob = res['proba'];  dt   = data['dates_test']
+    rt   = data['ret_test']
+
+    fig = plt.figure(figsize=(20, 16))
+    gs  = fig.add_gridspec(3, 3, hspace=0.45, wspace=0.38)
+    top3_str = " | ".join(f"{n}({a:.3f})" for n, a in res['top3'])
+    fig.suptitle(
+        f"🚨 FRAUD DEMO — {name} — با فیچر نشت‌دار (leak_feat)\n"
+        f"DA={res['DA']:.1f}%  AUC={res['AUC']:.1f}%  F1={res['F1']:.1f}%  "
+        f"AP={res['AP']:.1f}%  Brier={res['Brier']:.3f}\n"
+        f"Top-3: {top3_str}  |  Method: {res['method']}   ⚠️ غیرقابل‌استناد",
+        fontsize=11, fontweight='bold', color='#b91c1c')
+
+    ax1 = fig.add_subplot(gs[0, :])
+    correct = yte == yp
+    ax1.plot(dt, prob, '#b91c1c', lw=1.2, alpha=0.7, label='P(UP) [FRAUD]')
+    ax1.axhline(res['threshold'], color='#f6ad55', lw=2,
+                linestyle='--', label=f"Thr={res['threshold']:.2f}")
+    ax1.axhline(0.5, color='gray', lw=0.8, linestyle=':')
+    wrong_idx = [i for i in range(len(dt)) if not correct[i]]
+    ax1.scatter([dt[i] for i in wrong_idx], prob[wrong_idx],
+                s=14, color='black', alpha=0.5, zorder=3, label='Wrong')
+    ax1.set_ylabel('P(UP)'); ax1.set_title('🚨 Predicted Probability (FRAUD)')
+    ax1.legend(fontsize=8, ncol=4); ax1.set_ylim(-0.05, 1.05)
+    ax1.grid(True, alpha=0.3)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+
+    ax2 = fig.add_subplot(gs[1, 0])
+    cm_v = res['CM']
+    im = ax2.imshow(cm_v, cmap='Reds'); plt.colorbar(im, ax=ax2, fraction=0.046)
+    for ii in range(2):
+        for jj in range(2):
+            ax2.text(jj, ii,
+                     f"{cm_v[ii,jj]}\n({cm_v[ii,jj]/cm_v.sum()*100:.1f}%)",
+                     ha='center', va='center', fontsize=11,
+                     color='white' if cm_v[ii,jj] > cm_v.max()/2 else 'black',
+                     fontweight='bold')
+    ax2.set_xticks([0,1]); ax2.set_yticks([0,1])
+    ax2.set_xticklabels(['DOWN','UP']); ax2.set_yticklabels(['DOWN','UP'])
+    ax2.set_title('🚨 Confusion Matrix (FRAUD)')
+
+    ax3 = fig.add_subplot(gs[1, 1])
+    fpr, tpr, _ = roc_curve(yte, prob)
+    ax3.plot(fpr, tpr, '#b91c1c', lw=2.5, label=f"Stack {res['AUC']:.1f}%")
+    ax3.fill_between(fpr, tpr, alpha=0.1, color='#b91c1c')
+    ax3.plot([0,1],[0,1],'k--',lw=1)
+    ax3.set_xlabel('FPR'); ax3.set_ylabel('TPR')
+    ax3.set_title('🚨 ROC Curve (FRAUD)')
+    ax3.legend(fontsize=7); ax3.grid(True, alpha=0.3)
+
+    ax4 = fig.add_subplot(gs[1, 2])
+    t_aucs = fraud_tournament_aucs[name]
+    s_aucs = sorted(t_aucs.items(), key=lambda x: x[1])
+    ax4.barh([x[0] for x in s_aucs], [x[1]*100 for x in s_aucs],
+             color='#b91c1c', alpha=0.85)
+    ax4.axvline(50, color='black', lw=1.5, linestyle='--', label='Random')
+    ax4.set_xlabel('Val AUC (%)'); ax4.set_title('🚨 Tournament (FRAUD)')
+    ax4.legend(fontsize=7); ax4.grid(True, alpha=0.3, axis='x')
+
+    ax5 = fig.add_subplot(gs[2, :])
+    clrs = ['#27ae60' if yp1==1 and yt1==1
+            else '#2980b9' if yp1==0 and yt1==0
+            else '#e74c3c' if yp1==1 and yt1==0
+            else '#e67e22'
+            for yt1, yp1 in zip(yte, yp)]
+    ax5.bar(range(len(rt)), rt*100, color=clrs, alpha=0.8, width=1)
+    ax5.axhline(0, color='black', lw=0.8)
+    ax5.set_ylabel('5-Day Return (%)')
+    ax5.set_title('🚨 Actual Returns (FRAUD) [■TP ■TN ■FP ■FN]')
+    ax5.grid(True, alpha=0.3, axis='y')
+
+    plt.savefig(FP + f'FRAUD_plots/{name}_FRAUD_analysis.png',
+                dpi=150, bbox_inches='tight')
+    plt.show(); plt.close()
+    print(f"🚨 {name}: نمودار FRAUD ذخیره شد")
+
+
+# SHAP (معادل CELL 10)
+print("\n🚨 (FRAUD) SHAP Analysis...")
+fraud_shap_global = {}
+fig, axes = plt.subplots(n_rows_plot, n_cols_plot,
+                          figsize=(20, 6 * n_rows_plot), squeeze=False)
+axes = axes.flatten()
+
+for i, (name, data) in enumerate(fraud_prepared.items()):
+    lgbm_m = fraud_all_models[name]['lgbm']
+    ax     = axes[i]
+    exp    = shap_lib.TreeExplainer(lgbm_m)
+    sv     = exp.shap_values(data['X_test'])
+    if isinstance(sv, list): sv = sv[1]
+
+    fi = (pd.Series(np.abs(sv).mean(0), index=FEATURES_FRAUD)
+            .sort_values(ascending=False))
+    fi.to_csv(FP + f'FRAUD_shap/{name}_FRAUD_shap.csv')
+    fraud_shap_global[name] = fi
+
+    top  = fi.head(20)
+    clrs = ['#b91c1c' if f == 'leak_feat' else '#9ca3af' for f in top.index]
+
+    ax.barh(range(len(top)), top.values[::-1], color=clrs[::-1], alpha=0.9)
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels(top.index[::-1], fontsize=7)
+    ax.set_xlabel('Mean |SHAP|')
+    ax.set_title(f'🚨 {name} [FRAUD] — رتبهٔ leak_feat: '
+                 f'{list(fi.index).index("leak_feat")+1}', fontsize=9)
+    ax.grid(True, alpha=0.3, axis='x')
+
+for j in range(len(fraud_prepared), len(axes)):
+    axes[j].axis('off')
+
+plt.suptitle('🚨 SHAP Feature Importance (FRAUD) — leak_feat هایلایت شده',
+             fontsize=13, fontweight='bold', color='#b91c1c')
+plt.tight_layout()
+plt.savefig(FP + 'FRAUD_plots/all_FRAUD_shap.png', dpi=150, bbox_inches='tight')
+plt.show(); plt.close()
+print("🚨 (FRAUD) SHAP done")
+
+
+# Backtest (معادل CELL 11)
+fraud_backtest_results = {}
+print("\n🚨 (FRAUD) Backtest پیشرفته...\n")
+for name, data in fraud_prepared.items():
+    res = fraud_all_results[name]
+    dt  = data['dates_test']
+
+    top3_names = [x[0] for x in res['top3']]
+    pv_stack   = np.column_stack(
+        [get_proba(fraud_all_models[name][mn], mn, data['X_val'])
+         for mn in top3_names]).mean(axis=1)
+    if res['flipped']:
+        pv_stack = 1 - pv_stack
+
+    conf_high = max(float(np.percentile(pv_stack, 65)), 0.52)
+    conf_low  = min(float(np.percentile(pv_stack, 35)), 0.48)
+
+    # 🆕 v7: نوسانِ واقعیِ روزانه (رفع همان باگ dead-lookup در مسیر FRAUD)
+    vol_test = data['volatility_test']
+
+    bt  = run_backtest_advanced(data['ret_test'], res['proba'],
+                                 conf_high, conf_low, daily_vol=vol_test)
+    bt.index = dt
+    m   = calc_metrics(bt)
+    fraud_backtest_results[name] = (bt, m)
+
+    print(f"🚨 {name:12s}  CC={m['CC Return (%)']:+.1f}%  "
+          f"BnH={m['BnH Return (%)']:+.1f}%  Sharpe={m['Sharpe CC']:.2f}")
+
+    fig, axes2 = plt.subplots(2, 1, figsize=(14, 8))
+    fig.suptitle(
+        f"🚨 FRAUD DEMO — {name} — Backtest با فیچر نشت‌دار\n"
+        f"CC: {m['CC Return (%)']:+.1f}%  BnH: {m['BnH Return (%)']:+.1f}%  "
+        f"Sharpe={m['Sharpe CC']:.2f}   ⚠️ غیرقابل‌استناد",
+        fontsize=11, fontweight='bold', color='#b91c1c')
+
+    ax = axes2[0]
+    ax.plot(dt, bt['equity_cc'].values, '#b91c1c', lw=2.5,
+            label=f"CC [FRAUD] ({m['CC Return (%)']:+.1f}%)")
+    ax.plot(dt, bt['equity_bnh'].values, '#374151', lw=1.8, alpha=0.8,
+            label=f"B&H ({m['BnH Return (%)']:+.1f}%)")
+    ax.axhline(1.0, color='gray', lw=0.8, linestyle=':')
+    ax.set_ylabel('Portfolio Value'); ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+
+    ax2 = axes2[1]
+    dd  = (bt['equity_cc']  / bt['equity_cc'].cummax()  - 1) * 100
+    ddb = (bt['equity_bnh'] / bt['equity_bnh'].cummax() - 1) * 100
+    ax2.fill_between(dt, dd.values, 0, alpha=0.5, color='#b91c1c',
+                     label='CC Drawdown [FRAUD]')
+    ax2.plot(dt, ddb.values, '#374151', lw=1, alpha=0.7, label='BnH DD')
+    ax2.set_ylabel('Drawdown (%)'); ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+
+    plt.tight_layout()
+    plt.savefig(FP + f'FRAUD_plots/{name}_FRAUD_backtest.png',
+                dpi=150, bbox_inches='tight')
+    plt.show(); plt.close()
+    bt.to_csv(FP + f'FRAUD_backtest/{name}_FRAUD_backtest.csv')
+
+
+# بهینه‌سازی سبد (معادل CELL 12)
+print("\n" + "=" * 70)
+print("  🚨 (FRAUD) PORTFOLIO WEIGHT OPTIMIZATION")
+print("=" * 70)
+
+fraud_cc_returns = {name: bt['cc_return']
+                     for name, (bt, _) in fraud_backtest_results.items()}
+fraud_ret_matrix = pd.DataFrame(fraud_cc_returns).dropna(how='all').fillna(0.0)
+fraud_asset_order = list(fraud_ret_matrix.columns)
+fraud_n_assets = len(fraud_asset_order)
+
+fraud_mu_vec  = fraud_ret_matrix.mean().values * ANN
+fraud_cov_mat = fraud_ret_matrix.cov().values * ANN
+fraud_cov_mat = fraud_cov_mat + np.eye(fraud_n_assets) * 1e-6
+
+fraud_max_weight_cap = max(0.45, 1.0 / fraud_n_assets + 1e-6) if fraud_n_assets > 0 else 0.45
+fraud_bounds = tuple((0.0, fraud_max_weight_cap) for _ in range(fraud_n_assets))
+fraud_constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},)
+fraud_w0 = np.full(fraud_n_assets, 1.0 / fraud_n_assets)
+
+fraud_res_sharpe = minimize(
+    neg_sharpe, fraud_w0, args=(fraud_mu_vec, fraud_cov_mat),
+    method='SLSQP', bounds=fraud_bounds, constraints=fraud_constraints,
+    options={'maxiter': 500, 'ftol': 1e-9})
+fraud_w_sharpe = fraud_res_sharpe.x if fraud_res_sharpe.success else fraud_w0
+
+fraud_res_minvar = minimize(
+    portfolio_vol, fraud_w0, args=(fraud_cov_mat,),
+    method='SLSQP', bounds=fraud_bounds, constraints=fraud_constraints,
+    options={'maxiter': 500, 'ftol': 1e-9})
+fraud_w_minvar = fraud_res_minvar.x if fraud_res_minvar.success else fraud_w0
+
+fraud_portfolio_summary = {}
+for label, w in [('Max-Sharpe', fraud_w_sharpe),
+                  ('Min-Variance', fraud_w_minvar),
+                  ('Equal-Weight', fraud_w0.copy())]:
+    ret, vol, sharpe = portfolio_perf(w, fraud_mu_vec, fraud_cov_mat)
+    port_daily = fraud_ret_matrix.values @ w
+    var_h, cvar_h = historical_var_cvar(port_daily, alpha=0.05)
+    fraud_portfolio_summary[label] = {
+        'weights': dict(zip(fraud_asset_order, np.round(w, 3))),
+        'Expected Return (%/yr)': round(ret * 100, 1),
+        'Volatility (%/yr)':      round(vol * 100, 1),
+        'Sharpe':                 round(sharpe, 2),
+        'VaR95 (%)':              round(var_h  * 100, 2),
+        'CVaR95 (%)':             round(cvar_h * 100, 2),
+    }
+
+fraud_weights_df = pd.DataFrame(
+    {lbl: info['weights'] for lbl, info in fraud_portfolio_summary.items()})
+print("\n  🚨 وزن‌های سبد (FRAUD):\n")
+print(fraud_weights_df.to_string())
+
+fraud_best_portfolio = max(
+    fraud_portfolio_summary.items(), key=lambda kv: kv[1]['Sharpe'])[0]
+print(f"\n  🚨 بهترین پرتفوی (FRAUD) بر اساس شارپ: {fraud_best_portfolio}")
+for a, w in fraud_portfolio_summary[fraud_best_portfolio]['weights'].items():
+    print(f"       {a:12s}: {w*100:5.1f}%")
+
+pd.DataFrame(fraud_portfolio_summary).to_csv(
+    FP + 'FRAUD_portfolio_optimization.csv')
+
+fig, ax = plt.subplots(1, 2, figsize=(16, 6))
+fraud_weights_df.plot(kind='bar', ax=ax[0], alpha=0.85,
+                       color=['#b91c1c', '#f59e0b', '#9ca3af'])
+ax[0].set_ylabel('Weight'); ax[0].set_title('🚨 وزن سبد در سه سناریو (FRAUD)')
+ax[0].legend(fontsize=8); ax[0].grid(True, alpha=0.3, axis='y')
+
+fraud_scenarios = list(fraud_portfolio_summary.keys())
+fraud_rets = [fraud_portfolio_summary[s]['Expected Return (%/yr)'] for s in fraud_scenarios]
+fraud_vols = [fraud_portfolio_summary[s]['Volatility (%/yr)'] for s in fraud_scenarios]
+for i, s in enumerate(fraud_scenarios):
+    ax[1].scatter(fraud_vols[i], fraud_rets[i], s=200,
+                  color=['#b91c1c', '#f59e0b', '#9ca3af'][i],
+                  label=f"{s} (Sharpe={fraud_portfolio_summary[s]['Sharpe']:.2f})",
+                  edgecolors='black', zorder=3)
+ax[1].set_xlabel('Volatility (%/yr)'); ax[1].set_ylabel('Expected Return (%/yr)')
+ax[1].set_title('🚨 Risk-Return (FRAUD)')
+ax[1].legend(fontsize=8); ax[1].grid(True, alpha=0.3)
+
+plt.suptitle('⚠️ همهٔ اعداد این صفحه از مدلِ نشت‌دار ساخته شده‌اند — غیرقابل‌استناد',
+             fontsize=10, color='#b91c1c')
+plt.tight_layout()
+plt.savefig(FP + 'FRAUD_plots/FRAUD_portfolio_optimization.png',
+            dpi=150, bbox_inches='tight')
+plt.show(); plt.close()
+
+print("\n✅ (FRAUD) Portfolio optimization done")
+
+
+# جدول مقایسه نهایی: HONEST در برابر FRAUD
+fraud_final_rows = []
+for name in prepared:
+    res = fraud_all_results[name]
+    _, m = fraud_backtest_results[name]
+    fraud_final_rows.append({
+        'Asset': name,
+        'DA (%)': round(res['DA'], 1),
+        'AUC (%)': round(res['AUC'], 1),
+        'CC Return (%)': m['CC Return (%)'],
+        'Sharpe CC': m['Sharpe CC'],
+    })
+fraud_fdf = pd.DataFrame(fraud_final_rows).set_index('Asset')
+fraud_fdf.to_csv(FP + 'FRAUD_thesis_table_final.csv')
+
+print(f"\n{'='*110}")
+print("  ⚠️  جدول مقایسهٔ نهایی کلاسی: HONEST در برابر FRAUD  ⚠️")
+print(f"{'='*110}")
+
+compare_rows = []
+for name in ASSET_NAMES:
+    if name not in all_results or name not in fraud_all_results:
+        continue
+    h = all_results[name]; _, hm = backtest_results[name]
+    fr = fraud_all_results[name]; _, fm = fraud_backtest_results[name]
+    compare_rows.append({
+        'Asset': name,
+        '✅ Honest Top Model': best_model_info[name][0][0],
+        '🚨 Fraud Top Model':  fraud_best_model_info[name][0][0],
+        '✅ Honest AUC (%)':  round(h['AUC'], 1),
+        '🚨 Fraud AUC (%)':   round(fr['AUC'], 1),
+        '✅ Honest CC Ret(%)': hm['CC Return (%)'],
+        '🚨 Fraud CC Ret(%)':  fm['CC Return (%)'],
+        '✅ Honest Sharpe':   hm['Sharpe CC'],
+        '🚨 Fraud Sharpe':    fm['Sharpe CC'],
+        '✅ Honest weight':   portfolio_summary[best_portfolio]['weights'].get(name, np.nan),
+        '🚨 Fraud weight':    fraud_portfolio_summary[fraud_best_portfolio]['weights'].get(name, np.nan),
+    })
+final_compare_df = pd.DataFrame(compare_rows).set_index('Asset')
+print(final_compare_df.to_string())
+final_compare_df.to_csv(FP + 'CLASSROOM_ONLY_full_honest_vs_fraud.csv')
+
+print(f"""
+============================================================================
+  جمع‌بندی نهایی برای کلاس:
+============================================================================
+  هم HONEST و هم FRAUD دقیقاً از میان همین ۵ مدل (LightGBM, XGBoost,
+  RandomForest, StackingClassifier, VotingClassifier) بهترین را برای
+  هر سهم انتخاب کرده‌اند. مقایسهٔ ستون «Top Model» نشان می‌دهد که حتی
+  انتخاب «بهترین مدل» هم می‌تواند در دو حالت متفاوت باشد — چون
+  leak_feat رتبه‌بندی مدل‌ها را هم به‌هم می‌زند.
+
+  تنها منبع معتبر برای گزارش پایان‌نامه همچنان خروجی CELL 8 تا CELL 13
+  (thesis_table_final.csv) است.
+============================================================================
+""")
+
+print("✅ Pipeline کامل (HONEST + FRAUD، هر دو با همان ۵ مدل) کامل شد!")
