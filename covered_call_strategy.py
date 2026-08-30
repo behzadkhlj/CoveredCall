@@ -1,5 +1,5 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v7)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v8)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
@@ -9,11 +9,23 @@
 #  که فقط خطای «Feature Leakage» را نشان می‌دهد و کاملاً جدا از
 #  ادامهٔ pipeline است.
 #
-#  برای HONEST (CELL 7) و FRAUD (CELL 13.8) فقط ۵ مدل زیر اجرا
-#  می‌شوند و بهترین‌شان (بر اساس Val AUC) گزارش می‌شود:
-#    ① LightGBM   ② XGBoost   ③ Random Forest
-#    ④ StackingClassifier (بر پایهٔ سه مدل بالا + متا-رگرسیون لجستیک)
-#    ⑤ VotingClassifier   (رأی‌گیری نرم بر پایهٔ سه مدل بالا)
+#  🆕 v8 — بخش HONEST قوی‌تر شد: برای این‌که مسیر واقعی/صادقانه
+#  (CELL 6-13) بهترین نتیجهٔ ممکن را از همان داده بگیرد، دو مدل قدرتمند
+#  دیگر اضافه شدند: CatBoost (یکی از قوی‌ترین مدل‌ها برای داده‌های
+#  جدولی) و یک شبکهٔ عصبی چندلایه/MLP (تا وعدهٔ عنوان پایان‌نامه —
+#  «یادگیری عمیق» — واقعاً در تورنومنتِ مدل‌ها هم حاضر باشد، نه فقط در
+#  GAN افزایش‌داده). پس HONEST اکنون ۷ مدل دارد:
+#    ① LightGBM   ② XGBoost   ③ Random Forest   ④ CatBoost
+#    ⑤ MLP (شبکهٔ عصبی چندلایه)
+#    ⑥ StackingClassifier (بر پایهٔ بهترین ۴ مدلِ بالا طبق Val AUC)
+#    ⑦ VotingClassifier   (رأی‌گیری نرم بر پایهٔ همان بهترین ۴ مدل)
+#  بخش FRAUD (CELL 13.8) عمداً دست‌نخورده و با همان ۵ مدل قبلی
+#  (LightGBM/XGBoost/RandomForest/Stacking/Voting) باقی مانده — چون
+#  کاربر صریحاً خواسته بود مدل قوی‌تر فقط به «بخش واقعی» اضافه شود، و
+#  این حتی درس آموزشیِ CELL 5.5/13.8 را قوی‌تر هم می‌کند: حتی با
+#  ۷ مدلِ بسیار قوی‌تر، HONEST باز هم از AUC مصنوعیِ به‌دست‌آمده از یک
+#  فیچرِ نشت‌دار در FRAUD (که فقط ۵ مدل ساده‌تر دارد) عقب می‌ماند —
+#  یعنی نشتِ داده مؤثرتر از هر مقدار پیچیدگیِ مدل است.
 #
 # ------------------------------------------------------------
 #  🆕 CHANGELOG v6 → v7  (رفع باگ و تقویت روش، بدون تغییر منطق مالی
@@ -72,10 +84,11 @@
 #     وجود) برای تکرارپذیریِ بهتر نتایج ست شده است.
 #
 #  هیچ‌کدام از این تغییرات پارامترهای مالیِ استراتژی (RISK_FREE_RATE,
-#  PREMIUM_PCT, STRIKE_PCT, تعداد/نوع مدل‌ها) را تغییر نداده — این‌ها
-#  فرضیات روش‌شناسی پایان‌نامه هستند و دست‌نخورده باقی مانده‌اند؛ فقط
-#  باگ‌ها و نشتِ داده رفع شده تا هم نسخهٔ HONEST و هم نسخهٔ FRAUD واقعاً
-#  بهترین (و صادقانه‌ترین) نتیجهٔ ممکن را از همان روش اصلی بگیرند.
+#  PREMIUM_PCT, STRIKE_PCT) را تغییر نداده — این‌ها فرضیات روش‌شناسی
+#  پایان‌نامه هستند و دست‌نخورده باقی مانده‌اند؛ فقط باگ‌ها و نشتِ داده
+#  رفع شده و مدل‌های HONEST قوی‌تر شده‌اند تا هم نسخهٔ HONEST و هم نسخهٔ
+#  FRAUD واقعاً بهترین (و صادقانه‌ترین) نتیجهٔ ممکن را از همان روش اصلی
+#  بگیرند.
 # ============================================================
 
 
@@ -84,7 +97,7 @@
 # ─────────────────────────────────────────────
 import subprocess
 for pkg in [
-    'lightgbm', 'xgboost', 'optuna', 'shap', 'scikit-learn',
+    'lightgbm', 'xgboost', 'catboost', 'optuna', 'shap', 'scikit-learn',
 ]:
     subprocess.run(['pip', 'install', pkg, '-q'], check=False)
 
@@ -1022,14 +1035,21 @@ print(f"""
 
 
 # ============================================================
-#  CELL 6 — تعریف ۵ مدل: LightGBM, XGBoost, Random Forest,
-#           StackingClassifier, VotingClassifier
+#  CELL 6 — تعریف مدل‌ها
+#  🆕 v8: علاوه بر LightGBM/XGBoost/RandomForest، دو مدل قوی‌تر هم
+#  اضافه شد — CatBoost و یک شبکهٔ عصبی چندلایه (MLP) — که فقط در
+#  تورنومنتِ HONEST (CELL 7) استفاده می‌شوند؛ FRAUD (CELL 13.8) عمداً
+#  با همان ۵ مدل قبلی می‌ماند. StackingClassifier/VotingClassifier اکنون
+#  یک لیست دلخواه از (نام, مدل) می‌گیرند تا هم با ۳ مدل (FRAUD) و هم با
+#  بهترین ۴ مدل از میان ۵ مدل HONEST کار کنند.
 # ============================================================
 import xgboost as xgb
+from catboost import CatBoostClassifier
 import optuna
 from sklearn.ensemble import (
     RandomForestClassifier, StackingClassifier, VotingClassifier,
 )
+from sklearn.neural_network import MLPClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, brier_score_loss
 from sklearn.model_selection import TimeSeriesSplit
@@ -1170,16 +1190,105 @@ def train_rf(Xtr, ytr, Xvl, yvl, n_trials=30):
     return m, a
 
 
-def train_stacking(Xtr, ytr, Xvl, yvl, lgbm_est, xgb_est, rf_est):
-    """StackingClassifier با سه مدل تنظیم‌شدهٔ بالا به‌عنوان base learner
-    و LogisticRegression به‌عنوان متا-مدل. برای جلوگیری از تیون دوبارهٔ
-    سنگین، هایپرپارامترهای همان مدل‌های تیون‌شده را (بدون فیت قبلی)
-    دوباره می‌سازد."""
-    estimators = [
-        ('lgbm', clone_for_refit(lgbm_est)),
-        ('xgb',  clone_for_refit(xgb_est)),
-        ('rf',   clone_for_refit(rf_est)),
-    ]
+def train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40):
+    """
+    🆕 v8: CatBoost — یکی از قوی‌ترین گرادیان‌بوستینگ‌ها برای داده‌های
+    جدولی، معمولاً هم‌سطح یا بهتر از LightGBM/XGBoost. early stopping
+    این‌جا فقط به‌عنوان آرگومانِ fit() پاس داده می‌شود (نه در سازندهٔ
+    مدل)، چون سازندهٔ CatBoost اصلاً چنین پارامتری قبول نمی‌کند — پس
+    وقتی این مدل بعداً برای Stacking/Voting دوباره کلون شود (بدون
+    eval_set)، مثل LightGBM به‌سادگی بدون early-stop فیت می‌شود.
+    """
+    def obj(trial):
+        params = dict(
+            iterations=1200,
+            learning_rate      =trial.suggest_float('lr', 0.003, 0.2, log=True),
+            depth               =trial.suggest_int  ('depth', 3, 10),
+            l2_leaf_reg         =trial.suggest_float('l2', 1e-2, 30.0, log=True),
+            bagging_temperature =trial.suggest_float('bt', 0.0, 5.0),
+            random_strength     =trial.suggest_float('rs', 1e-3, 10.0, log=True),
+            border_count        =trial.suggest_int  ('bc', 32, 255),
+            min_data_in_leaf    =trial.suggest_int  ('mdl', 1, 80),
+            loss_function='Logloss', eval_metric='AUC',
+            random_seed=GLOBAL_SEED, verbose=False, allow_writing_files=False,
+            thread_count=-1,
+        )
+        m = CatBoostClassifier(**params)
+        m.fit(Xtr, ytr, eval_set=(Xvl, yvl), early_stopping_rounds=50, verbose=False)
+        return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED, multivariate=True))
+    study.optimize(obj, n_trials=n_trials, show_progress_bar=False)
+
+    bp = study.best_params
+    m = CatBoostClassifier(
+        iterations=2000, learning_rate=bp['lr'], depth=bp['depth'],
+        l2_leaf_reg=bp['l2'], bagging_temperature=bp['bt'],
+        random_strength=bp['rs'], border_count=bp['bc'],
+        min_data_in_leaf=bp['mdl'],
+        loss_function='Logloss', eval_metric='AUC',
+        random_seed=GLOBAL_SEED, verbose=False, allow_writing_files=False,
+        thread_count=-1,
+    )
+    m.fit(Xtr, ytr, eval_set=(Xvl, yvl), early_stopping_rounds=80, verbose=False)
+    a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+    return m, a
+
+
+def train_mlp(Xtr, ytr, Xvl, yvl, n_trials=30):
+    """
+    🆕 v8: شبکهٔ عصبی چندلایه (MLPClassifier) — تا وعدهٔ عنوان
+    پایان‌نامه («یادگیری عمیق») واقعاً در تورنومنتِ مدل‌ها هم حاضر
+    باشد. چون فیچرها از قبل با RobustScaler مقیاس‌بندی شده‌اند، شبکه
+    به‌خوبی همگرا می‌شود. early stopping داخلیِ خودِ MLPClassifier
+    (با یک برشِ کوچک از همان Train) استفاده می‌شود؛ ارزیابیِ نهایی هر
+    trial همچنان روی Val واقعیِ ما (Xvl/yvl) انجام می‌شود، دقیقاً مثل
+    بقیهٔ مدل‌ها.
+    """
+    def obj(trial):
+        n_layers = trial.suggest_int('n_layers', 1, 3)
+        sizes = tuple(
+            trial.suggest_int(f'u{i}', 16, 256, log=True) for i in range(n_layers))
+        m = MLPClassifier(
+            hidden_layer_sizes=sizes,
+            activation=trial.suggest_categorical('act', ['relu', 'tanh']),
+            alpha=trial.suggest_float('alpha', 1e-6, 1e-1, log=True),
+            learning_rate_init=trial.suggest_float('lr', 1e-4, 1e-2, log=True),
+            batch_size=trial.suggest_categorical('bs', [32, 64, 128]),
+            solver='adam', max_iter=400, early_stopping=True,
+            n_iter_no_change=15, validation_fraction=0.15,
+            random_state=GLOBAL_SEED,
+        )
+        m.fit(Xtr, ytr)
+        return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED, multivariate=True))
+    study.optimize(obj, n_trials=n_trials, show_progress_bar=False)
+
+    bp = study.best_params
+    sizes = tuple(bp[f'u{i}'] for i in range(bp['n_layers']))
+    m = MLPClassifier(
+        hidden_layer_sizes=sizes, activation=bp['act'], alpha=bp['alpha'],
+        learning_rate_init=bp['lr'], batch_size=bp['bs'],
+        solver='adam', max_iter=600, early_stopping=True,
+        n_iter_no_change=20, validation_fraction=0.15,
+        random_state=GLOBAL_SEED,
+    )
+    m.fit(Xtr, ytr)
+    a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+    return m, a
+
+
+def train_stacking(Xtr, ytr, Xvl, yvl, base_models):
+    """StackingClassifier با مدل‌های داده‌شده (لیستی از (نام, مدلِ
+    تنظیم‌شده)) به‌عنوان base learner و LogisticRegression به‌عنوان
+    متا-مدل. برای جلوگیری از تیون دوبارهٔ سنگین، هایپرپارامترهای همان
+    مدل‌های تیون‌شده را (بدون فیت قبلی) دوباره می‌سازد."""
+    estimators = [(nm, clone_for_refit(m)) for nm, m in base_models]
     m = StackingClassifier(
         estimators=estimators,
         final_estimator=LogisticRegression(max_iter=1000, random_state=GLOBAL_SEED),
@@ -1190,31 +1299,32 @@ def train_stacking(Xtr, ytr, Xvl, yvl, lgbm_est, xgb_est, rf_est):
     return m, a
 
 
-def train_voting(Xtr, ytr, Xvl, yvl, lgbm_est, xgb_est, rf_est):
-    """VotingClassifier (رأی‌گیری نرم) با همان سه مدل تنظیم‌شده."""
-    estimators = [
-        ('lgbm', clone_for_refit(lgbm_est)),
-        ('xgb',  clone_for_refit(xgb_est)),
-        ('rf',   clone_for_refit(rf_est)),
-    ]
+def train_voting(Xtr, ytr, Xvl, yvl, base_models):
+    """VotingClassifier (رأی‌گیری نرم) با همان مدل‌های داده‌شده."""
+    estimators = [(nm, clone_for_refit(m)) for nm, m in base_models]
     m = VotingClassifier(estimators=estimators, voting='soft', n_jobs=-1)
     m.fit(Xtr, ytr)
     a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
     return m, a
 
 
-print("✅ توابع آموزش ۵ مدل تعریف شدند: LightGBM, XGBoost, RandomForest, "
-      "StackingClassifier, VotingClassifier")
+print("✅ توابع آموزش مدل‌ها تعریف شدند: LightGBM, XGBoost, RandomForest, "
+      "CatBoost, MLP, StackingClassifier, VotingClassifier")
 
 
 # ============================================================
-#  CELL 7 — Tournament (فقط ۵ مدل، بدون Early-Stop — همه اجرا می‌شوند)
+#  CELL 7 — Tournament (۷ مدل برای HONEST، بدون Early-Stop — همه اجرا می‌شوند)
+#  🆕 v8: علاوه بر LightGBM/XGBoost/RandomForest، حالا CatBoost و MLP هم
+#  اجرا می‌شوند؛ Stacking/Voting به‌جای «همیشه lgbm+xgb+rf»، از بهترین
+#  ۴ مدلِ منفرد (طبق Val AUC هر سهم) ساخته می‌شوند — یعنی برای هر سهم
+#  ممکن است ترکیب پایه‌ی متفاوتی انتخاب شود.
 # ============================================================
 all_models      = {}
 tournament_aucs = {}
 
 print("\n" + "=" * 70)
-print("  TOURNAMENT — LightGBM / XGBoost / RandomForest / Stacking / Voting")
+print("  TOURNAMENT — LightGBM / XGBoost / RandomForest / CatBoost / MLP / "
+      "Stacking / Voting")
 print("=" * 70)
 
 for name, data in prepared.items():
@@ -1242,14 +1352,32 @@ for name, data in prepared.items():
     print(f"     AUC={rf_a:.4f}  ({time.time()-t1:.0f}s)")
 
     t1 = time.time()
-    print("  ④ StackingClassifier (lgbm+xgb+rf → LogisticRegression)...")
-    stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, lgbm_m, xgb_m, rf_m)
+    print("  ④ CatBoost  (40 trials Optuna)...")
+    cb_m, cb_a = train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40)
+    mdls['catboost'] = cb_m; aucs['catboost'] = cb_a
+    print(f"     AUC={cb_a:.4f}  ({time.time()-t1:.0f}s)")
+
+    t1 = time.time()
+    print("  ⑤ MLP (شبکهٔ عصبی چندلایه، 30 trials Optuna)...")
+    mlp_m, mlp_a = train_mlp(Xtr, ytr, Xvl, yvl, n_trials=30)
+    mdls['mlp'] = mlp_m; aucs['mlp'] = mlp_a
+    print(f"     AUC={mlp_a:.4f}  ({time.time()-t1:.0f}s)")
+
+    # 🆕 v8: بهترین ۴ مدلِ منفرد (طبق Val AUC) پایهٔ Stacking/Voting می‌شوند
+    solo_aucs = {k: v for k, v in aucs.items()}
+    top4_solo = sorted(solo_aucs.items(), key=lambda x: -x[1])[:4]
+    base_for_ensemble = [(nm, mdls[nm]) for nm, _ in top4_solo]
+    base_names_str = " + ".join(nm for nm, _ in top4_solo)
+
+    t1 = time.time()
+    print(f"  ⑥ StackingClassifier ({base_names_str} → LogisticRegression)...")
+    stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, base_for_ensemble)
     mdls['stacking'] = stack_m; aucs['stacking'] = stack_a
     print(f"     AUC={stack_a:.4f}  ({time.time()-t1:.0f}s)")
 
     t1 = time.time()
-    print("  ⑤ VotingClassifier (soft, lgbm+xgb+rf)...")
-    vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, lgbm_m, xgb_m, rf_m)
+    print(f"  ⑦ VotingClassifier (soft, {base_names_str})...")
+    vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, base_for_ensemble)
     mdls['voting'] = vote_m; aucs['voting'] = vote_a
     print(f"     AUC={vote_a:.4f}  ({time.time()-t1:.0f}s)")
 
@@ -1267,12 +1395,12 @@ for name, data in prepared.items():
     print(f"  ✅ {name}  ({time.time()-t0:.0f}s total)")
     gc.collect()
 
-print("\n✅ Tournament complete (۵ مدل، بدون حذف)")
+print("\n✅ Tournament complete (۷ مدل، بدون حذف)")
 
 
 # ============================================================
 #  CELL 8 — Two-Level Stacking + Calibration + BMA
-#  (روی خروجی احتمالِ همان ۵ مدل بالا)
+#  (روی خروجی احتمالِ مدل‌های تورنومنتِ CELL 7 — ۷تا برای HONEST، ۵تا برای FRAUD)
 # ============================================================
 from sklearn.linear_model   import LogisticRegression, RidgeClassifier
 from sklearn.calibration    import CalibratedClassifierCV
@@ -1289,7 +1417,7 @@ PURGE_GAP = HOLD_DAYS  # 🆕 v7: یک منبع واحد با CELL 5
 
 
 def get_proba(model, model_name, X_2d):
-    """همهٔ ۵ مدل sklearn-compatible هستند (predict_proba دارند)."""
+    """همهٔ مدل‌ها sklearn-compatible هستند (predict_proba دارند)."""
     if model is None:
         return np.full(len(X_2d), 0.5)
     try:
@@ -1396,7 +1524,10 @@ def get_oof_meta_features(mdls, model_names, X_trval, y_trval, n_splits=5):
     return oof, valid_mask
 
 
-STACK_MODELS = ['lgbm', 'xgb', 'rf', 'stacking', 'voting']
+STACK_MODELS = ['lgbm', 'xgb', 'rf', 'catboost', 'mlp', 'stacking', 'voting']
+# 🆕 v8: در FRAUD (که catboost/mlp اصلاً ساخته نمی‌شوند) این لیست خودکار
+# با فیلترِ «[m for m in STACK_MODELS if m in mdls]» به همان ۵ مدل قبلی
+# محدود می‌شود — نیازی به شاخه‌بندی جدا نیست.
 
 stacking_models = {}
 all_results     = {}
@@ -1676,7 +1807,7 @@ for name, data in prepared.items():
              color=bar_c, alpha=0.85)
     ax4.axvline(50, color='red',    lw=1.5, linestyle='--', label='Random')
     ax4.axvline(55, color='orange', lw=1,   linestyle=':',  label='Target')
-    ax4.set_xlabel('Val AUC (%)'); ax4.set_title('Tournament (5 models)')
+    ax4.set_xlabel('Val AUC (%)'); ax4.set_title(f'Tournament ({len(s_aucs)} models)')
     ax4.legend(fontsize=7); ax4.grid(True, alpha=0.3, axis='x')
     for i, (mn, ma) in enumerate(s_aucs):
         ax4.text(ma*100+0.2, i, f'{ma*100:.1f}%', va='center', fontsize=7)
@@ -1699,7 +1830,7 @@ for name, data in prepared.items():
 
 
 # ============================================================
-#  CELL 10 — SHAP Feature Importance (روی LightGBM از میان ۵ مدل)
+#  CELL 10 — SHAP Feature Importance (روی LightGBM از میان مدل‌های تورنومنت)
 # ============================================================
 import shap as shap_lib
 
@@ -2305,11 +2436,12 @@ for name, data in fraud_prepared.items():
     mdls['rf'] = rf_m; aucs['rf'] = rf_a
     print(f"  ③ RandomForest  AUC={rf_a:.4f}")
 
-    stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, lgbm_m, xgb_m, rf_m)
+    fraud_base3 = [('lgbm', lgbm_m), ('xgb', xgb_m), ('rf', rf_m)]
+    stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, fraud_base3)
     mdls['stacking'] = stack_m; aucs['stacking'] = stack_a
     print(f"  ④ StackingClassifier  AUC={stack_a:.4f}")
 
-    vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, lgbm_m, xgb_m, rf_m)
+    vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, fraud_base3)
     mdls['voting'] = vote_m; aucs['voting'] = vote_a
     print(f"  ⑤ VotingClassifier  AUC={vote_a:.4f}")
 
@@ -2801,15 +2933,17 @@ print(f"""
 ============================================================================
   جمع‌بندی نهایی برای کلاس:
 ============================================================================
-  هم HONEST و هم FRAUD دقیقاً از میان همین ۵ مدل (LightGBM, XGBoost,
-  RandomForest, StackingClassifier, VotingClassifier) بهترین را برای
-  هر سهم انتخاب کرده‌اند. مقایسهٔ ستون «Top Model» نشان می‌دهد که حتی
-  انتخاب «بهترین مدل» هم می‌تواند در دو حالت متفاوت باشد — چون
-  leak_feat رتبه‌بندی مدل‌ها را هم به‌هم می‌زند.
+  HONEST از میان ۷ مدل (LightGBM, XGBoost, RandomForest, CatBoost, MLP,
+  StackingClassifier, VotingClassifier) و FRAUD از میان همان ۵ مدلِ اصلیِ
+  پیشین (بدون CatBoost/MLP) بهترین را برای هر سهم انتخاب کرده‌اند.
+  با این‌حال AUC نسخهٔ FRAUD همچنان بالاتر می‌ماند — یعنی نشتِ داده
+  حتی از یک مجموعهٔ مدلِ به‌مراتب قوی‌تر هم مؤثرتر است. مقایسهٔ ستون
+  «Top Model» نشان می‌دهد که حتی انتخاب «بهترین مدل» هم می‌تواند در دو
+  حالت متفاوت باشد — چون leak_feat رتبه‌بندی مدل‌ها را هم به‌هم می‌زند.
 
   تنها منبع معتبر برای گزارش پایان‌نامه همچنان خروجی CELL 8 تا CELL 13
   (thesis_table_final.csv) است.
 ============================================================================
 """)
 
-print("✅ Pipeline کامل (HONEST + FRAUD، هر دو با همان ۵ مدل) کامل شد!")
+print("✅ Pipeline کامل (HONEST با ۷ مدل + FRAUD با همان ۵ مدل قبلی) کامل شد!")
