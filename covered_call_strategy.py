@@ -1,5 +1,5 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v11)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v12)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
@@ -16,6 +16,15 @@
 #       تفکیکِ خاص — این دقیقاً همان نوع شاهدی است که یک هیئتِ داوریِ
 #       پایان‌نامه برایِ اعتبارسنجی می‌خواهد. منبعِ رسمیِ گزارش همچنان
 #       CELL 13 (thesis_table_final.csv) است؛ این چک فقط مکمل است.
+#
+#  🆕 v12 — آزمایشِ کاهشِ فیچر (CELL 10.8): چون Walk-Forward نشان داد
+#  AUC چند سهم ناپایدار است، فرضیهٔ overfitting (۹۶ فیچر روی
+#  ~۱۶۰۰-۲۳۰۰ ردیف) آزمایش شد — Top-30 فیچر طبق میانگینِ SHAP نگه
+#  داشته شد و کلِ تورنومنتِ ۸-مدلی + Walk-Forward با همان بودجهٔ Optuna
+#  از نو روی این فیچرهای کاهش‌یافته اجرا و با نسخهٔ کامل مقایسه شد.
+#  این هم یک آزمایشِ مکمل است، نه جایگزینِ pipeline رسمی — نتیجه‌اش هرچه
+#  باشد (بهتر یا بدتر) صادقانه در خروجی و در RESULTS_ANALYSIS.md گزارش
+#  می‌شود.
 #
 #  ⚠️ نسخهٔ آموزشیِ «تشخیص تقلب علمی» ⚠️
 #  همان کد اصلی پایان‌نامه است، با یک سلولِ آموزشیِ اضافه (CELL 5.5)
@@ -2209,6 +2218,166 @@ for feat, val in mean_fi.head(20).items():
     print(f"    {cat} {feat:30s}: {val:.4f}")
 
 print("✅ SHAP done")
+
+
+# ============================================================================
+#  CELL 10.8 — 🆕 v12: آزمایشِ کاهشِ فیچر (Feature Pruning) بر پایهٔ SHAP
+#  این یک آزمایشِ مکمل است، نه جایگزینِ pipeline اصلی — منبعِ رسمیِ گزارش
+#  همچنان CELL 13 (روی همان ۹۶ فیچر) می‌ماند. انگیزه: CELL 8.5 نشان داد
+#  AUC چند سهم در Walk-Forward ناپایدار است؛ فرضیه این است که با ۹۶ فیچر
+#  روی ~۱۶۰۰-۲۳۰۰ ردیفِ آموزشی، مدل‌ها ممکن است overfit کنند. این‌جا فقط
+#  Top-30 فیچر (طبق میانگینِ SHAP از CELL 10 — یعنی هیچ نگاهی به تست/آینده
+#  ندارد) نگه داشته می‌شود، تمامِ ۸ مدل با همان بودجهٔ Optuna از نو تیون
+#  می‌شوند، و پایداریِ Walk-Forward با نسخهٔ کامل مقایسه می‌شود. نتیجه از
+#  قبل معلوم نیست — ممکن است AUC رسمی کمی افت کند در ازای پایداریِ بهتر،
+#  یا حتی هر دو بهتر شوند. هر دو حالت را صادقانه گزارش می‌کنیم.
+# ============================================================================
+FEATURE_PRUNE_K = 30
+FEATURES_PRUNED = list(mean_fi.head(FEATURE_PRUNE_K).index)
+
+print("\n" + "=" * 70)
+print(f"  🆕 FEATURE-PRUNING EXPERIMENT — کاهش فیچر از {len(FEATURES)} به "
+      f"{len(FEATURES_PRUNED)} (بر اساس میانگینِ SHAP)")
+print("=" * 70)
+print("  فیچرهای منتخب:", ", ".join(FEATURES_PRUNED))
+
+pruned_prepared = {}
+for name, data in prepared.items():
+    df_full = data['_df_feat_full']
+    tr_sl, vl_sl, te_sl = time_split_slices(len(df_full))
+    tr = df_full.iloc[tr_sl]; vl = df_full.iloc[vl_sl]; te = df_full.iloc[te_sl]
+    sc = RobustScaler()
+    pruned_prepared[name] = {
+        'X_train': sc.fit_transform(tr[FEATURES_PRUNED]), 'y_train': tr['target'].values,
+        'X_val':   sc.transform(vl[FEATURES_PRUNED]),      'y_val':   vl['target'].values,
+        'X_test':  sc.transform(te[FEATURES_PRUNED]),      'y_test':  te['target'].values,
+        '_df_feat_full': df_full,
+    }
+
+pruned_all_models  = {}
+pruned_all_results = {}
+
+for name, data in pruned_prepared.items():
+    t0 = time.time()
+    Xtr, ytr = data['X_train'], data['y_train']
+    Xvl, yvl = data['X_val'],   data['y_val']
+    sw_tr = recency_weights(len(Xtr))
+    mdls = {}; aucs = {}
+
+    lgbm_m, lgbm_a = train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60, sample_weight_tr=sw_tr)
+    mdls['lgbm'] = lgbm_m; aucs['lgbm'] = lgbm_a
+    xgb_m, xgb_a = train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40, sample_weight_tr=sw_tr)
+    mdls['xgb'] = xgb_m; aucs['xgb'] = xgb_a
+    rf_m, rf_a = train_rf(Xtr, ytr, Xvl, yvl, n_trials=30, sample_weight_tr=sw_tr)
+    mdls['rf'] = rf_m; aucs['rf'] = rf_a
+    cb_m, cb_a = train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40, sample_weight_tr=sw_tr)
+    mdls['catboost'] = cb_m; aucs['catboost'] = cb_a
+    mlp_m, mlp_a = train_mlp(Xtr, ytr, Xvl, yvl, n_trials=30)
+    mdls['mlp'] = mlp_m; aucs['mlp'] = mlp_a
+    if _TORCH_OK:
+        lstm_m, lstm_a = train_lstm(Xtr, ytr, Xvl, yvl, n_trials=20)
+        mdls['lstm'] = lstm_m; aucs['lstm'] = lstm_a
+
+    top5 = sorted(aucs.items(), key=lambda x: -x[1])[:5]
+    base_for_ensemble = [(nm, mdls[nm]) for nm, _ in top5]
+    stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, base_for_ensemble)
+    mdls['stacking'] = stack_m; aucs['stacking'] = stack_a
+    vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, base_for_ensemble)
+    mdls['voting'] = vote_m; aucs['voting'] = vote_a
+
+    best_name = max(aucs, key=aucs.get)
+    Xte, yte  = data['X_test'], data['y_test']
+    test_auc  = roc_auc_score(yte, mdls[best_name].predict_proba(Xte)[:, 1])
+    pruned_all_models[name]  = mdls
+    pruned_all_results[name] = {'best_name': best_name, 'val_auc': aucs[best_name],
+                                 'test_auc': test_auc}
+    print(f"  {name:12s} [{best_name:10s}]  Val AUC={aucs[best_name]:.4f}  "
+          f"Test AUC={test_auc:.4f}  ({time.time()-t0:.0f}s)")
+
+print("\n  🆕 Walk-Forward روی فیچرِ کاهش‌یافته:")
+pruned_walk_forward = {}
+for name, data in pruned_prepared.items():
+    champion_name  = pruned_all_results[name]['best_name']
+    champion_model = pruned_all_models[name].get(champion_name)
+    if champion_model is None or champion_name in ('stacking', 'voting'):
+        print(f"    {name:12s}: مدلِ برتر ({champion_name}) مرکب است — رد شد")
+        continue
+    df_full = data['_df_feat_full']
+    tscv = TimeSeriesSplit(n_splits=WF_N_SPLITS)
+    fold_aucs = []
+    for tr_idx, te_idx in tscv.split(df_full):
+        if len(tr_idx) <= HOLD_DAYS:
+            continue
+        tr_fold = df_full.iloc[tr_idx[:-HOLD_DAYS]]
+        te_fold = df_full.iloc[te_idx]
+        if tr_fold['target'].nunique() < 2 or te_fold['target'].nunique() < 2:
+            continue
+        try:
+            sc_fold = RobustScaler().fit(tr_fold[FEATURES_PRUNED])
+            Xtr_f = sc_fold.transform(tr_fold[FEATURES_PRUNED])
+            Xte_f = sc_fold.transform(te_fold[FEATURES_PRUNED])
+            m_fold = clone_for_refit(champion_model)
+            m_fold.fit(Xtr_f, tr_fold['target'].values)
+            p_fold = m_fold.predict_proba(Xte_f)[:, 1]
+            fold_aucs.append(roc_auc_score(te_fold['target'].values, p_fold))
+        except Exception as e:
+            print(f"      ⚠️ {name} یک foldِ walk-forward ناموفق بود: {e}")
+    if fold_aucs:
+        pruned_walk_forward[name] = fold_aucs
+        print(f"    {name:12s} [{champion_name:10s}]  WF AUC = "
+              f"{np.mean(fold_aucs):.4f} ± {np.std(fold_aucs):.4f}")
+    else:
+        print(f"    {name:12s}: هیچ foldِ معتبری به‌دست نیامد")
+
+# 🆕 مقایسهٔ منصفانه: هر دو ستون از AUC خامِ مدلِ برترِ CELL 7-مانند
+# استفاده می‌کنند (نه خروجیِ کالیبره‌شده/استک‌شدهٔ CELL 8) تا مقایسه
+# دقیقاً apples-to-apples بماند.
+def _raw_test_auc(model, Xte, yte):
+    return roc_auc_score(yte, model.predict_proba(Xte)[:, 1])
+
+print("\n" + "=" * 70)
+print(f"  📊 مقایسهٔ فیچرِ کامل ({len(FEATURES)}) در برابر فیچرِ کاهش‌یافته "
+      f"({len(FEATURES_PRUNED)})")
+print("=" * 70)
+comp_rows = []
+for name in prepared:
+    full_champ_name = best_model_info[name][0][0]
+    full_champ      = all_models[name][full_champ_name]
+    full_val_auc    = best_model_info[name][0][1]
+    full_test_auc   = _raw_test_auc(full_champ, prepared[name]['X_test'], prepared[name]['y_test'])
+    full_wf         = np.mean(walk_forward_results[name]) if name in walk_forward_results else np.nan
+    full_wf_std     = np.std(walk_forward_results[name]) if name in walk_forward_results else np.nan
+
+    pr = pruned_all_results[name]
+    pruned_champ    = pruned_all_models[name][pr['best_name']]
+    pruned_test_auc = _raw_test_auc(pruned_champ, pruned_prepared[name]['X_test'], pruned_prepared[name]['y_test'])
+    pruned_wf       = np.mean(pruned_walk_forward[name]) if name in pruned_walk_forward else np.nan
+    pruned_wf_std   = np.std(pruned_walk_forward[name]) if name in pruned_walk_forward else np.nan
+
+    comp_rows.append({
+        'Asset': name,
+        f'Full({len(FEATURES)}) Val AUC': round(full_val_auc, 4),
+        f'Full({len(FEATURES)}) Test AUC': round(full_test_auc, 4),
+        f'Full({len(FEATURES)}) WF AUC': round(full_wf, 4) if not np.isnan(full_wf) else np.nan,
+        f'Full({len(FEATURES)}) WF Std': round(full_wf_std, 4) if not np.isnan(full_wf_std) else np.nan,
+        f'Pruned({len(FEATURES_PRUNED)}) Val AUC': round(pr['val_auc'], 4),
+        f'Pruned({len(FEATURES_PRUNED)}) Test AUC': round(pruned_test_auc, 4),
+        f'Pruned({len(FEATURES_PRUNED)}) WF AUC': round(pruned_wf, 4) if not np.isnan(pruned_wf) else np.nan,
+        f'Pruned({len(FEATURES_PRUNED)}) WF Std': round(pruned_wf_std, 4) if not np.isnan(pruned_wf_std) else np.nan,
+    })
+comp_df = pd.DataFrame(comp_rows).set_index('Asset')
+print(comp_df.to_string())
+comp_df.to_csv(FP + 'feature_pruning_comparison.csv')
+
+n_wf_improved = sum(
+    1 for name in prepared
+    if name in walk_forward_results and name in pruned_walk_forward
+    and np.std(pruned_walk_forward[name]) < np.std(walk_forward_results[name])
+)
+print(f"\n  ℹ️ پایداریِ Walk-Forward (انحرافِ‌معیارِ کمتر) در "
+      f"{n_wf_improved} از {len(walk_forward_results)} سهم با فیچرِ "
+      f"کاهش‌یافته بهتر شد. این یک آزمایشِ صادقانه است — اگر نتیجه بهتر "
+      f"نشود هم در فایل ذخیره و گزارش می‌شود، نه فقط وقتی بهتر شود.")
 
 
 # ============================================================
