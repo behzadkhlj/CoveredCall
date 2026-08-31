@@ -1,8 +1,21 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v10)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v11)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
+#
+#  🆕 v11 — دو افزودهٔ روش‌شناختی که «قطعاً» چیزی را خراب نمی‌کنند و
+#  به‌طور معقول احتمالِ نتیجهٔ بهتر/معتبرتر را بالا می‌برند:
+#    ۱) Recency Weighting: به مدل‌های درختی (LightGBM/XGBoost/
+#       RandomForest/CatBoost) وزنِ نمایی می‌دهیم که ردیف‌های نزدیک‌تر
+#       به امروز را مهم‌تر می‌شمارد (half-life=۵۰۰ ردیف ≈ ۲ سال) — چون
+#       بازارِ TSE در این ۱۰ سال چند رژیمِ کاملاً متفاوت را رد کرده.
+#    ۲) Walk-Forward Robustness Check (CELL 8.5): معماریِ برندهٔ هر سهم
+#       با همان هایپرپارامترها روی ۳ بازهٔ زمانیِ غلتان دوباره ارزیابی
+#       می‌شود تا معلوم شود AUC رسمی پایدار است یا محصولِ شانسیِ یک
+#       تفکیکِ خاص — این دقیقاً همان نوع شاهدی است که یک هیئتِ داوریِ
+#       پایان‌نامه برایِ اعتبارسنجی می‌خواهد. منبعِ رسمیِ گزارش همچنان
+#       CELL 13 (thesis_table_final.csv) است؛ این چک فقط مکمل است.
 #
 #  ⚠️ نسخهٔ آموزشیِ «تشخیص تقلب علمی» ⚠️
 #  همان کد اصلی پایان‌نامه است، با یک سلولِ آموزشیِ اضافه (CELL 5.5)
@@ -1117,7 +1130,22 @@ def clone_for_refit(estimator):
     return type(estimator)(**params)
 
 
-def train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60):
+def recency_weights(n, half_life=500):
+    """
+    🆕 v11: وزنِ نزدیکی‌به‌زمانِ‌حال (Recency Weighting) — چون بازارِ TSE
+    در بازهٔ ۲۰۱۵-۲۰۲۵ چند رژیمِ کاملاً متفاوت را رد کرده (کرونا، جهش‌های
+    ارزی، افزایش‌سرمایه‌های سنگین)، دادن وزنِ بیشتر به ردیف‌های نزدیک‌تر
+    به امروز باعث می‌شود مدل بیشتر روی رژیمِ فعلی تمرکز کند، نه رفتارِ
+    میانگینِ کلِ ۱۰ سال. `half_life` بر حسب تعداد ردیف است (پیش‌فرض ۵۰۰
+    ردیف ≈ ۲ سال معاملاتی)؛ آخرین ردیف وزنِ ۱.۰ و ردیف‌های قدیمی‌تر با
+    افتِ نمایی وزن می‌گیرند. کاملاً causal است — فقط از ترتیبِ زمانیِ
+    داده (که Xtr از قبل به همان ترتیب مرتب است) استفاده می‌کند.
+    """
+    idx = np.arange(n)
+    return 0.5 ** ((n - 1 - idx) / half_life)
+
+
+def train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60, sample_weight_tr=None):
     def obj(trial):
         params = dict(
             objective='binary', n_estimators=2000,
@@ -1134,7 +1162,8 @@ def train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60):
             random_state=GLOBAL_SEED, n_jobs=-1, verbosity=-1,
         )
         m = lgb.LGBMClassifier(**params)
-        m.fit(Xtr, ytr, eval_set=[(Xvl, yvl)], eval_metric='auc',
+        m.fit(Xtr, ytr, sample_weight=sample_weight_tr,
+              eval_set=[(Xvl, yvl)], eval_metric='auc',
               callbacks=[lgb.early_stopping(50, verbose=False)])
         return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
 
@@ -1154,13 +1183,14 @@ def train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60):
         max_depth=bp['dep'], min_child_weight=bp['mcw'],
         random_state=GLOBAL_SEED, n_jobs=-1, verbosity=-1,
     )
-    m.fit(Xtr, ytr, eval_set=[(Xvl, yvl)], eval_metric='auc',
+    m.fit(Xtr, ytr, sample_weight=sample_weight_tr,
+          eval_set=[(Xvl, yvl)], eval_metric='auc',
           callbacks=[lgb.early_stopping(80, verbose=False)])
     a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
     return m, a
 
 
-def train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40):
+def train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40, sample_weight_tr=None):
     def obj(trial):
         m = xgb.XGBClassifier(
             objective='binary:logistic', eval_metric='auc',
@@ -1180,7 +1210,8 @@ def train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40):
             n_estimators=2000, early_stopping_rounds=50,
             verbosity=0, random_state=GLOBAL_SEED,
         )
-        m.fit(Xtr, ytr, eval_set=[(Xvl, yvl)], verbose=False)
+        m.fit(Xtr, ytr, sample_weight=sample_weight_tr,
+              eval_set=[(Xvl, yvl)], verbose=False)
         return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
 
     study = optuna.create_study(
@@ -1201,12 +1232,13 @@ def train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40):
         n_estimators=3000, early_stopping_rounds=80,
         verbosity=0, random_state=GLOBAL_SEED,
     )
-    m.fit(Xtr, ytr, eval_set=[(Xvl, yvl)], verbose=False)
+    m.fit(Xtr, ytr, sample_weight=sample_weight_tr,
+          eval_set=[(Xvl, yvl)], verbose=False)
     a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
     return m, a
 
 
-def train_rf(Xtr, ytr, Xvl, yvl, n_trials=30):
+def train_rf(Xtr, ytr, Xvl, yvl, n_trials=30, sample_weight_tr=None):
     def obj(trial):
         p = dict(
             n_estimators         = trial.suggest_int('n', 100, 600),
@@ -1217,7 +1249,7 @@ def train_rf(Xtr, ytr, Xvl, yvl, n_trials=30):
             n_jobs=-1, class_weight='balanced', random_state=GLOBAL_SEED,
         )
         m = RandomForestClassifier(**p)
-        m.fit(Xtr, ytr)
+        m.fit(Xtr, ytr, sample_weight=sample_weight_tr)
         return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
 
     study = optuna.create_study(
@@ -1232,12 +1264,12 @@ def train_rf(Xtr, ytr, Xvl, yvl, n_trials=30):
         min_impurity_decrease=bp['mid'],
         n_jobs=-1, class_weight='balanced', random_state=GLOBAL_SEED,
     )
-    m.fit(Xtr, ytr)
+    m.fit(Xtr, ytr, sample_weight=sample_weight_tr)
     a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
     return m, a
 
 
-def train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40):
+def train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40, sample_weight_tr=None):
     """
     🆕 v8: CatBoost — یکی از قوی‌ترین گرادیان‌بوستینگ‌ها برای داده‌های
     جدولی، معمولاً هم‌سطح یا بهتر از LightGBM/XGBoost. early stopping
@@ -1261,7 +1293,8 @@ def train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40):
             thread_count=-1,
         )
         m = CatBoostClassifier(**params)
-        m.fit(Xtr, ytr, eval_set=(Xvl, yvl), early_stopping_rounds=50, verbose=False)
+        m.fit(Xtr, ytr, sample_weight=sample_weight_tr,
+              eval_set=(Xvl, yvl), early_stopping_rounds=50, verbose=False)
         return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
 
     study = optuna.create_study(
@@ -1279,7 +1312,8 @@ def train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40):
         random_seed=GLOBAL_SEED, verbose=False, allow_writing_files=False,
         thread_count=-1,
     )
-    m.fit(Xtr, ytr, eval_set=(Xvl, yvl), early_stopping_rounds=80, verbose=False)
+    m.fit(Xtr, ytr, sample_weight=sample_weight_tr,
+          eval_set=(Xvl, yvl), early_stopping_rounds=80, verbose=False)
     a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
     return m, a
 
@@ -1541,27 +1575,31 @@ for name, data in prepared.items():
     Xvl, yvl = data['X_val'],   data['y_val']
     mdls = {}; aucs = {}; t0 = time.time()
 
+    # 🆕 v11: وزن‌دهیِ نزدیکی‌به‌زمانِ‌حال — فقط برای مدل‌های درختی که از
+    # sample_weight پشتیبانی می‌کنند (MLP/LSTM بدون وزن آموزش می‌بینند)
+    sw_tr = recency_weights(len(Xtr))
+
     t1 = time.time()
     print("  ① LightGBM  (60 trials Optuna)...")
-    lgbm_m, lgbm_a = train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60)
+    lgbm_m, lgbm_a = train_lgbm(Xtr, ytr, Xvl, yvl, n_trials=60, sample_weight_tr=sw_tr)
     mdls['lgbm'] = lgbm_m; aucs['lgbm'] = lgbm_a
     print(f"     AUC={lgbm_a:.4f}  ({time.time()-t1:.0f}s)")
 
     t1 = time.time()
     print("  ② XGBoost   (40 trials Optuna)...")
-    xgb_m, xgb_a = train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40)
+    xgb_m, xgb_a = train_xgb(Xtr, ytr, Xvl, yvl, n_trials=40, sample_weight_tr=sw_tr)
     mdls['xgb'] = xgb_m; aucs['xgb'] = xgb_a
     print(f"     AUC={xgb_a:.4f}  ({time.time()-t1:.0f}s)")
 
     t1 = time.time()
     print("  ③ Random Forest (30 trials Optuna)...")
-    rf_m, rf_a = train_rf(Xtr, ytr, Xvl, yvl, n_trials=30)
+    rf_m, rf_a = train_rf(Xtr, ytr, Xvl, yvl, n_trials=30, sample_weight_tr=sw_tr)
     mdls['rf'] = rf_m; aucs['rf'] = rf_a
     print(f"     AUC={rf_a:.4f}  ({time.time()-t1:.0f}s)")
 
     t1 = time.time()
     print("  ④ CatBoost  (40 trials Optuna)...")
-    cb_m, cb_a = train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40)
+    cb_m, cb_a = train_catboost(Xtr, ytr, Xvl, yvl, n_trials=40, sample_weight_tr=sw_tr)
     mdls['catboost'] = cb_m; aucs['catboost'] = cb_a
     print(f"     AUC={cb_a:.4f}  ({time.time()-t1:.0f}s)")
 
@@ -1928,6 +1966,70 @@ print(smdf.to_string())
 print(f"\n  Mean DA:  {smdf['Final_DA'].mean():.1f}%")
 print(f"  Mean AUC: {smdf['Final_AUC'].mean():.1f}%")
 print(f"  Mean AP:  {smdf['AP(%)'].mean():.1f}%")
+
+
+# ============================================================
+#  CELL 8.5 — 🆕 v11: بررسیِ استحکام با Walk-Forward Validation
+#  مکملِ CELL 8 است، نه جایگزینِ آن — منبعِ رسمیِ گزارش همچنان CELL 13
+#  (thesis_table_final.csv) می‌ماند. این‌جا فقط معماریِ برندهٔ هر سهم
+#  (با همان هایپرپارامترهایی که CELL 7 پیدا کرده — بدون تیونِ دوباره،
+#  تا هزینهٔ محاسباتی منطقی بماند) روی چند بازهٔ زمانیِ غلتان
+#  (sklearn.TimeSeriesSplit, با همان Purge Gap استاندارد) دوباره فیت و
+#  ارزیابی می‌شود تا معلوم شود AUC رسمی محصولِ شانسیِ یک تفکیکِ خاص
+#  نیست یا واقعاً در طولِ زمان پایدار است — دقیقاً همان نوع شاهدی که
+#  برای فصلِ «اعتبارسنجی»/«محدودیت‌ها»ی پایان‌نامه لازم است.
+# ============================================================
+print("\n" + "=" * 70)
+print("  🆕 WALK-FORWARD ROBUSTNESS CHECK (مکمل — نه جایگزینِ گزارش رسمیِ CELL 13)")
+print("=" * 70)
+
+walk_forward_results = {}
+WF_N_SPLITS = 3
+
+for name, data in prepared.items():
+    champion_name  = best_model_info[name][0][0]
+    champion_model = all_models[name].get(champion_name)
+    if champion_model is None or champion_name in ('stacking', 'voting'):
+        print(f"  {name:12s}: مدلِ برتر ({champion_name}) مرکب است — "
+              f"از این چکِ سبک صرف‌نظر شد")
+        continue
+
+    df_full = data['_df_feat_full']
+    tscv = TimeSeriesSplit(n_splits=WF_N_SPLITS)
+    fold_aucs = []
+    for tr_idx, te_idx in tscv.split(df_full):
+        if len(tr_idx) <= HOLD_DAYS:
+            continue
+        tr_fold = df_full.iloc[tr_idx[:-HOLD_DAYS]]   # همان Purge Gap استاندارد
+        te_fold = df_full.iloc[te_idx]
+        if tr_fold['target'].nunique() < 2 or te_fold['target'].nunique() < 2:
+            continue
+        try:
+            sc_fold = RobustScaler().fit(tr_fold[FEATURES])
+            Xtr_f = sc_fold.transform(tr_fold[FEATURES])
+            Xte_f = sc_fold.transform(te_fold[FEATURES])
+            m_fold = clone_for_refit(champion_model)
+            m_fold.fit(Xtr_f, tr_fold['target'].values)
+            p_fold = m_fold.predict_proba(Xte_f)[:, 1]
+            fold_aucs.append(roc_auc_score(te_fold['target'].values, p_fold))
+        except Exception as e:
+            print(f"    ⚠️ {name} یک foldِ walk-forward ناموفق بود: {e}")
+
+    if fold_aucs:
+        walk_forward_results[name] = fold_aucs
+        official_auc = all_results[name]['AUC'] / 100
+        print(f"  {name:12s} [{champion_name:10s}]  Walk-Forward AUC = "
+              f"{np.mean(fold_aucs):.4f} ± {np.std(fold_aucs):.4f}  "
+              f"(از {len(fold_aucs)} fold؛ AUC رسمیِ CELL 8 = {official_auc:.4f})")
+    else:
+        print(f"  {name:12s}: هیچ foldِ معتبری به‌دست نیامد")
+
+print("""
+  ℹ️ این بررسی جایگزینِ گزارشِ رسمی (CELL 8/13) نیست — فقط نشان می‌دهد
+  آیا AUC گزارش‌شده در چند بازهٔ زمانیِ متفاوت هم پایدار می‌ماند یا
+  محصولِ شانسیِ یک تفکیکِ خاص است. انحرافِ‌معیارِ بزرگ یعنی عملکرد به
+  بازهٔ زمانیِ انتخابی حساس است و باید در فصلِ «محدودیت‌ها» ذکر شود.
+""")
 
 
 # ============================================================
