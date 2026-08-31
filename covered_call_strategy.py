@@ -1,5 +1,5 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v9)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v10)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
@@ -8,6 +8,23 @@
 #  همان کد اصلی پایان‌نامه است، با یک سلولِ آموزشیِ اضافه (CELL 5.5)
 #  که فقط خطای «Feature Leakage» را نشان می‌دهد و کاملاً جدا از
 #  ادامهٔ pipeline است.
+#
+#  🆕 v10 — طراحیِ منطقِ بک‌تست (CELL 11) اصلاح شد تا مقایسهٔ CC در
+#  برابر Buy&Hold واقعاً منصفانه باشد؛ نسخهٔ قبلی به دو دلیل ساختاری
+#  تقریباً همیشه از BnH عقب می‌ماند، صرف‌نظر از کیفیت مدل: (۱) اندازهٔ
+#  پوزیشنِ سهام با اطمینانِ مدل کوچک/بزرگ می‌شد و در سیگنالِ نزولی
+#  کاملاً به CASH می‌رفت (یعنی استراتژی اغلب فقط ۱۰-۴۰٪ در بازار بود،
+#  در حالی که BnH همیشه ۱۰۰٪ است)، (۲) هیچ گیتی برای رالی‌های قویِ
+#  صعودی نبود. هر دو رفع شدند: اکنون پوزیشنِ سهام همیشه کامل است
+#  (دقیقاً مثل صندوق‌های واقعیِ Covered-Call مثل JEPI/QYLD که overlay
+#  فقط تصمیم به فروش/عدم‌فروش کال است، نه اندازهٔ پوزیشن)، و در روندِ
+#  صعودیِ قویِ تأییدشده تا لحظهٔ t (بدون نگاه به آینده) اصلاً کالی
+#  فروخته نمی‌شود. مهم: این تغییرات منطقِ *استراتژی* را واقع‌بینانه‌تر
+#  کرده‌اند، نه چیزی در مدل یا برچسب‌ها را دستکاری کرده‌اند — با این
+#  حال چون چند سهم در این بازه رشدهای ۳۰۰٪ تا ۱۸۰۰٪ داشته‌اند، حتی
+#  یک استراتژیِ کاورد-کالِ کاملاً منصفانه هم ذاتاً نمی‌تواند همیشه از
+#  Buy&Hold در یک ابررالی جلو بزند — این محدودیتِ ریاضیِ خودِ
+#  Covered Call است (سقفِ سود در برابرِ درآمدِ پرمیوم)، نه یک باگ.
 #
 #  🆕 v8 — بخش HONEST قوی‌تر شد: برای این‌که مسیر واقعی/صادقانه
 #  (CELL 6-13) بهترین نتیجهٔ ممکن را از همان داده بگیرد، دو مدل قدرتمند
@@ -982,6 +999,14 @@ for name, df_raw in filtered.items():
         'ret_test':    te['ret_5d'].values,
         'regime_test': te['regime'].values,
         'volatility_test': te['volatility'].values,  # 🆕 v7: برای گیت واقعیِ بلک-شولز در بک‌تست
+        # 🆕 v10: سیگنالِ روندِ صعودیِ قوی (فقط از دادهٔ تا لحظهٔ t) — وقتی
+        # ۱ است یعنی sma10>sma20>sma50 و مومنتومِ چند-تایم‌فریم به‌وضوح
+        # مثبت است؛ در بک‌تست برای غیرفعال‌کردنِ فروشِ کال در رالیِ قوی
+        # استفاده می‌شود.
+        'bull_trend_test': (
+            (te['trend_dir'] == 1) & (te['trend_str'] == 1)
+            & (te['mtf_momentum_score'] > 0.3)
+        ).astype(int).values,
         'scaler':      sc,
         'X_trval': np.vstack([Xtr, Xvl]),
         'y_trval': np.concatenate([tr['target'].values, vl['target'].values]),
@@ -2165,13 +2190,33 @@ print("\n✅ VaR/CVaR و قیمت تعادلی بلک-شولز محاسبه شد
 
 # ============================================================
 #  CELL 11 — Backtest پیشرفته
+#  🆕 v10: بازطراحیِ منطق پوزیشن‌گیری تا واقعاً یک استراتژیِ Covered
+#  Call منصفانه‌قابل‌مقایسه با Buy&Hold باشد — نه یک استراتژیِ
+#  market-timing با روکشِ آپشن. دو مشکل ساختاریِ نسخهٔ قبلی که باعث
+#  می‌شد CC تقریباً همیشه از BnH عقب بماند (حتی وقتی جهتِ پیش‌بینی مدل
+#  درست بود) این‌جا رفع شده‌اند:
+#    ۱) اندازهٔ پوزیشنِ سهام قبلاً با اطمینانِ مدل کوچک/بزرگ می‌شد
+#       (`pos_raw = edge*4`) و در حالتِ نزولی کاملاً به CASH می‌رفت —
+#       یعنی استراتژی اغلب فقط ۱۰-۴۰٪ در بازار بود، در حالی که BnH
+#       همیشه ۱۰۰٪ است. این مقایسه را از پایه ناعادلانه می‌کرد.
+#       صندوق‌های واقعیِ Covered-Call (JEPI/QYLD و مشابه) همیشه در
+#       سهامِ پایه به‌طور کامل سرمایه‌گذاری‌اند؛ overlay فقط تصمیم به
+#       فروش/عدم‌فروش کال است، نه اندازهٔ پوزیشنِ سهام. اکنون پوزیشنِ
+#       سهام همیشه ۱۰۰٪ است و تنها «وزنِ فروشِ کال» (`call_weight`)
+#       با اطمینانِ مدل تغییر می‌کند.
+#    ۲) 🆕 گیتِ روند: وقتی سیگنالِ روندِ صعودیِ قویِ بدونِ‌نگاه‌به‌آینده
+#       (`bull_trend` — از sma/adx/مومنتومِ چند-تایم‌فریمِ تا لحظهٔ t)
+#       فعال است، اصلاً کال فروخته نمی‌شود تا سقفِ سود در بحبوحهٔ یک
+#       رالیِ قوی نیفتد — دقیقاً کاری که دسک‌های Buy-Write واقعی هم
+#       می‌کنند.
+#  هیچ‌کدام از این تغییرات به قیمت‌های آینده یا برچسبِ target نگاه
+#  نمی‌کنند؛ فقط منطقِ خودِ استراتژی (نه مدل) واقع‌بینانه‌تر شده است.
 # ============================================================
 def run_backtest_advanced(ret_true, proba, conf_high, conf_low,
                            premium=PREMIUM_PCT, strike=STRIKE_PCT,
-                           tc=TRANS_COST, daily_vol=None):
+                           tc=TRANS_COST, daily_vol=None, bull_trend=None):
     cap_cc  = 1.0; cap_bnh = 1.0
-    records = []; prev = 'CASH'
-    max_cap = 1.0
+    records = []; prev = 'STOCK_ONLY'
 
     n = len(ret_true)
     if daily_vol is None:
@@ -2181,38 +2226,46 @@ def run_backtest_advanced(ret_true, proba, conf_high, conf_low,
         dv = np.where(np.isnan(dv), np.nanmedian(dv[~np.isnan(dv)]) if np.any(~np.isnan(dv)) else 0.02, dv)
         bs_fair = bs_fair_premium_pct(dv, strike_pct=strike)
 
+    bull_trend = (np.zeros(n, dtype=int) if bull_trend is None
+                  else np.asarray(bull_trend).astype(int))
+
     for i, (ret, p) in enumerate(zip(ret_true, proba)):
         ret = float(ret); p = float(p)
         cap_bnh *= max(0.001, 1 + ret)
-        max_cap  = max(max_cap, cap_cc)
 
         bs_ok = premium >= bs_fair[i]
+        edge  = abs(p - 0.5)
+        # وزنِ فروشِ کال (نه اندازهٔ پوزیشنِ سهام، که همیشه کامل می‌ماند)
+        call_weight = min(1.0, edge * 4)
 
-        edge   = abs(p - 0.5)
-        pos_raw= min(1.0, edge * 4)
-
-        if p > conf_high and bs_ok:
+        if bull_trend[i] == 1:
+            # روندِ صعودیِ قویِ تأییدشده تا امروز → کال نمی‌فروشیم، کاملاً
+            # در معرض رشد بمانیم (بدون نگاه به بازدهِ واقعیِ فردا)
+            action = 'STOCK_ONLY_TREND'
+            cc_ret = ret
+        elif p > conf_high and bs_ok:
             action = 'COVERED_CALL'
-            cc_ret = (min(ret, strike) + premium
-                      if ret >= 0 else ret + premium)
-            pos    = pos_raw
-        elif p < conf_low:
-            action = 'CASH'; cc_ret = 0.0; pos = 0.0
+            capped = min(ret, strike) + premium if ret >= 0 else ret + premium
+            cc_ret = call_weight * capped + (1 - call_weight) * ret
         elif p > 0.5 + (conf_high - 0.5) * 0.5 and bs_ok:
             action = 'PARTIAL_CC'
-            cc_ret = (min(ret, strike/2) + premium * 0.5
-                      if ret >= 0 else ret + premium * 0.5)
-            pos    = pos_raw * 0.6
+            w = 0.5 * call_weight
+            capped = min(ret, strike/2) + premium * 0.5 if ret >= 0 else ret + premium * 0.5
+            cc_ret = w * capped + (1 - w) * ret
         else:
-            action = 'STOCK_ONLY'; cc_ret = ret; pos = pos_raw * 0.4
+            # شاملِ حالتِ نزولی (p < conf_low) هم می‌شود: یک صندوقِ
+            # Covered-Call واقعی نمی‌تواند شورت کند یا کاملاً از بازار
+            # خارج شود — فقط سهامِ کامل و بدون‌پوشش نگه می‌دارد.
+            action = 'STOCK_ONLY'; cc_ret = ret
 
-        cost    = tc if action != prev else 0.0
-        net     = max(cc_ret * pos - cost, -0.10)
-        cap_cc  = max(0.001, cap_cc * (1 + net))
+        cost   = tc if action != prev else 0.0
+        net    = max(cc_ret - cost, -0.10)
+        cap_cc = max(0.001, cap_cc * (1 + net))
         records.append({
             'ret_actual': ret, 'cc_return': net,
             'equity_cc':  cap_cc, 'equity_bnh': cap_bnh,
-            'action': action, 'proba': p, 'position': pos,
+            'action': action, 'proba': p,
+            'position': 1.0,          # 🆕 v10: پوزیشنِ سهام همیشه کامل است
             'bs_fair_premium': bs_fair[i], 'bs_sold': bs_ok,
         })
         prev = action
@@ -2232,6 +2285,9 @@ def calc_metrics(df):
     cc_r  = (eq.iloc[-1]  - 1) * 100
     bnh_r = (eqb.iloc[-1] - 1) * 100
     var_cc, cvar_cc = historical_var_cvar(r.values, alpha=0.05)
+    # 🆕 v10: پوزیشنِ سهام همیشه ۱۰۰٪ است (نگاه کنید به run_backtest_advanced)
+    # پس معیارِ مفیدتر این‌جا «چه کسری از روزها واقعاً کال فروخته شد» است
+    call_written_pct = df['action'].isin(['COVERED_CALL', 'PARTIAL_CC']).mean() * 100
     return {
         'CC Return (%)':  round(cc_r,  1),
         'BnH Return (%)': round(bnh_r, 1),
@@ -2243,6 +2299,7 @@ def calc_metrics(df):
         'Calmar CC':      round(cc_r / (abs(mdd(eq)*100) + 1e-8), 2),
         'Win Rate (%)':   round((r > 0).mean() * 100, 1),
         'Avg Position':   round(df['position'].mean(), 2),
+        'Call Written (%)': round(call_written_pct, 1),
         'VaR95 CC (%)':   round(var_cc  * 100, 2),
         'CVaR95 CC (%)':  round(cvar_cc * 100, 2),
     }
@@ -2269,9 +2326,11 @@ for name, data in prepared.items():
     # 🆕 v7: نوسانِ واقعیِ روزانهٔ تست (رفع باگ dead-lookup که گیت بلک-شولز
     # را همیشه غیرفعال می‌کرد)
     vol_test = data['volatility_test']
+    bull_trend_test = data['bull_trend_test']  # 🆕 v10: گیتِ روندِ صعودی
 
     bt  = run_backtest_advanced(data['ret_test'], res['proba'],
-                                 conf_high, conf_low, daily_vol=vol_test)
+                                 conf_high, conf_low, daily_vol=vol_test,
+                                 bull_trend=bull_trend_test)
     bt.index = dt
     m   = calc_metrics(bt)
     act = bt['action'].value_counts().to_dict()
@@ -2284,7 +2343,7 @@ for name, data in prepared.items():
     print(f"  Sharpe={m['Sharpe CC']:.2f}  Sortino={m['Sortino CC']:.2f}  "
           f"Calmar={m['Calmar CC']:.2f}")
     print(f"  WinRate={m['Win Rate (%)']:.1f}%  MaxDD={m['MaxDD CC (%)']:.1f}%  "
-          f"AvgPos={m['Avg Position']:.2f}")
+          f"CallWritten={m['Call Written (%)']:.1f}%")
     print(f"  VaR95={rm['VaR_hist_95 (%)']:.2f}%  CVaR95={rm['CVaR_hist_95 (%)']:.2f}%  "
           f"روزهای مجاز فروش کال طبق بلک-شولز={cc_sold_ratio:.1f}%")
     print(f"  Actions: {act}\n")
@@ -2308,7 +2367,7 @@ for name, data in prepared.items():
     eq_arr  = bt['equity_cc'].values
     eq_min  = eq_arr.min() * 0.97
     eq_max  = eq_arr.max() * 1.03
-    colors_bt = {'CASH':'#fff3cd','STOCK_ONLY':'#d4edda',
+    colors_bt = {'STOCK_ONLY':'#d4edda', 'STOCK_ONLY_TREND':'#fff3cd',
                  'COVERED_CALL':'#cce5ff','PARTIAL_CC':'#e8d5ff'}
     for act_n, col in colors_bt.items():
         mask = (bt['action'] == act_n).values
@@ -2482,7 +2541,7 @@ for name in prepared:
         'Calmar CC':      m['Calmar CC'],
         'MaxDD CC (%)':   m['MaxDD CC (%)'],
         'Win Rate (%)':   m['Win Rate (%)'],
-        'Avg Position':   m['Avg Position'],
+        'Call Written (%)': m['Call Written (%)'],
         'VaR95 CC (%)':   m['VaR95 CC (%)'],
         'CVaR95 CC (%)':  m['CVaR95 CC (%)'],
         'BS_fair_premium (%)': risk_metrics[name]['BS_fair_premium (%)'],
@@ -2595,6 +2654,10 @@ for name, d in prepared.items():
         'ret_test':    te['ret_5d'].values,
         'regime_test': te['regime'].values,
         'volatility_test': te['volatility'].values,  # 🆕 v7
+        'bull_trend_test': (  # 🆕 v10
+            (te['trend_dir'] == 1) & (te['trend_str'] == 1)
+            & (te['mtf_momentum_score'] > 0.3)
+        ).astype(int).values,
         'scaler':      sc,
         'X_trval': np.vstack([Xtr, Xvl]),
         'y_trval': np.concatenate([tr['target'].values, vl['target'].values]),
@@ -2945,9 +3008,11 @@ for name, data in fraud_prepared.items():
 
     # 🆕 v7: نوسانِ واقعیِ روزانه (رفع همان باگ dead-lookup در مسیر FRAUD)
     vol_test = data['volatility_test']
+    bull_trend_test = data['bull_trend_test']  # 🆕 v10
 
     bt  = run_backtest_advanced(data['ret_test'], res['proba'],
-                                 conf_high, conf_low, daily_vol=vol_test)
+                                 conf_high, conf_low, daily_vol=vol_test,
+                                 bull_trend=bull_trend_test)
     bt.index = dt
     m   = calc_metrics(bt)
     fraud_backtest_results[name] = (bt, m)
