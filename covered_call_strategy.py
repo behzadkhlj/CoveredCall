@@ -1,5 +1,5 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v8)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v9)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
@@ -14,18 +14,31 @@
 #  دیگر اضافه شدند: CatBoost (یکی از قوی‌ترین مدل‌ها برای داده‌های
 #  جدولی) و یک شبکهٔ عصبی چندلایه/MLP (تا وعدهٔ عنوان پایان‌نامه —
 #  «یادگیری عمیق» — واقعاً در تورنومنتِ مدل‌ها هم حاضر باشد، نه فقط در
-#  GAN افزایش‌داده). پس HONEST اکنون ۷ مدل دارد:
+#  GAN افزایش‌داده).
+#
+#  🆕 v9 — یک مدلِ سری‌زمانیِ عمیقِ واقعی هم اضافه شد: LSTM (شبکهٔ
+#  Long Short-Term Memory، معروف‌ترین معماریِ یادگیری‌عمیق برای دنباله‌های
+#  زمانی) که — برخلاف بقیهٔ مدل‌ها که هر روز را مستقل می‌بینند — روی یک
+#  پنجرهٔ متحرکِ ۱۰ تا ۴۰ روزهٔ فیچرها آموزش می‌بیند تا الگوی زمانیِ
+#  دنباله را یاد بگیرد. دربارهٔ مدل‌های «زبانیِ» سری‌زمانیِ آماده
+#  (Chronos/TimesFM/Moirai — مدل‌های از-پیش‌آموزش‌دیده مبتنی بر
+#  معماریِ Transformer) هم تلاش شد، اما دانلودِ checkpoint از
+#  Hugging Face در محیطِ ساخت این کد توسط سیاست شبکه مسدود بود؛ چون
+#  امکانِ تست/اعتبارسنجیِ واقعیِ آن‌ها فراهم نشد، به‌جای ارسال کدِ
+#  آزمایش‌نشده، از افزودنشان صرف‌نظر شد — LSTM (که کاملاً تست شده)
+#  جایگزینِ قابل‌اعتمادش است. پس HONEST اکنون ۸ مدل دارد:
 #    ① LightGBM   ② XGBoost   ③ Random Forest   ④ CatBoost
-#    ⑤ MLP (شبکهٔ عصبی چندلایه)
-#    ⑥ StackingClassifier (بر پایهٔ بهترین ۴ مدلِ بالا طبق Val AUC)
-#    ⑦ VotingClassifier   (رأی‌گیری نرم بر پایهٔ همان بهترین ۴ مدل)
+#    ⑤ MLP (شبکهٔ عصبی چندلایه)   ⑥ LSTM (شبکهٔ عصبی بازگشتیِ دنباله‌ای)
+#    ⑦ StackingClassifier (بر پایهٔ بهترین ۵ مدلِ بالا طبق Val AUC)
+#    ⑧ VotingClassifier   (رأی‌گیری نرم بر پایهٔ همان بهترین ۵ مدل)
 #  بخش FRAUD (CELL 13.8) عمداً دست‌نخورده و با همان ۵ مدل قبلی
 #  (LightGBM/XGBoost/RandomForest/Stacking/Voting) باقی مانده — چون
 #  کاربر صریحاً خواسته بود مدل قوی‌تر فقط به «بخش واقعی» اضافه شود، و
 #  این حتی درس آموزشیِ CELL 5.5/13.8 را قوی‌تر هم می‌کند: حتی با
-#  ۷ مدلِ بسیار قوی‌تر، HONEST باز هم از AUC مصنوعیِ به‌دست‌آمده از یک
-#  فیچرِ نشت‌دار در FRAUD (که فقط ۵ مدل ساده‌تر دارد) عقب می‌ماند —
-#  یعنی نشتِ داده مؤثرتر از هر مقدار پیچیدگیِ مدل است.
+#  ۸ مدلِ بسیار قوی‌تر (از جمله یک مدلِ سری‌زمانیِ اختصاصی)، HONEST باز
+#  هم از AUC مصنوعیِ به‌دست‌آمده از یک فیچرِ نشت‌دار در FRAUD (که فقط
+#  ۵ مدل ساده‌تر دارد) عقب می‌ماند — یعنی نشتِ داده مؤثرتر از هر مقدار
+#  پیچیدگیِ مدل است.
 #
 # ------------------------------------------------------------
 #  🆕 CHANGELOG v6 → v7  (رفع باگ و تقویت روش، بدون تغییر منطق مالی
@@ -97,7 +110,7 @@
 # ─────────────────────────────────────────────
 import subprocess
 for pkg in [
-    'lightgbm', 'xgboost', 'catboost', 'optuna', 'shap', 'scikit-learn',
+    'lightgbm', 'xgboost', 'catboost', 'optuna', 'shap', 'scikit-learn', 'torch',
 ]:
     subprocess.run(['pip', 'install', pkg, '-q'], check=False)
 
@@ -1037,11 +1050,13 @@ print(f"""
 # ============================================================
 #  CELL 6 — تعریف مدل‌ها
 #  🆕 v8: علاوه بر LightGBM/XGBoost/RandomForest، دو مدل قوی‌تر هم
-#  اضافه شد — CatBoost و یک شبکهٔ عصبی چندلایه (MLP) — که فقط در
-#  تورنومنتِ HONEST (CELL 7) استفاده می‌شوند؛ FRAUD (CELL 13.8) عمداً
-#  با همان ۵ مدل قبلی می‌ماند. StackingClassifier/VotingClassifier اکنون
-#  یک لیست دلخواه از (نام, مدل) می‌گیرند تا هم با ۳ مدل (FRAUD) و هم با
-#  بهترین ۴ مدل از میان ۵ مدل HONEST کار کنند.
+#  اضافه شد — CatBoost و یک شبکهٔ عصبی چندلایه (MLP).
+#  🆕 v9: یک مدل سری‌زمانیِ عمیقِ واقعی هم اضافه شد — LSTM — که روی
+#  پنجرهٔ متحرکِ فیچرها (نه هر روز مستقل) آموزش می‌بیند. همهٔ این‌ها
+#  فقط در تورنومنتِ HONEST (CELL 7) استفاده می‌شوند؛ FRAUD (CELL 13.8)
+#  عمداً با همان ۵ مدل قبلی می‌ماند. StackingClassifier/VotingClassifier
+#  اکنون یک لیست دلخواه از (نام, مدل) می‌گیرند تا هم با ۳ مدل (FRAUD)
+#  و هم با بهترین ۵ مدل از میان ۶ مدل HONEST کار کنند.
 # ============================================================
 import xgboost as xgb
 from catboost import CatBoostClassifier
@@ -1053,7 +1068,14 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, brier_score_loss
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.base import clone
+from sklearn.base import clone, BaseEstimator, ClassifierMixin
+
+try:
+    import torch
+    import torch.nn as nn
+    _TORCH_OK = True
+except ImportError:
+    _TORCH_OK = False
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -1283,6 +1305,165 @@ def train_mlp(Xtr, ytr, Xvl, yvl, n_trials=30):
     return m, a
 
 
+# ------------------------------------------------------------------
+# 🆕 v9 — LSTM: مدل یادگیری‌عمیقِ دنباله‌ای واقعی (نه فقط ردیف‌به‌ردیف)
+# ------------------------------------------------------------------
+if _TORCH_OK:
+
+    class _LSTMNet(nn.Module):
+        def __init__(self, n_features, hidden_size, num_layers, dropout):
+            super().__init__()
+            self.lstm = nn.LSTM(
+                n_features, hidden_size, num_layers=num_layers, batch_first=True,
+                dropout=dropout if num_layers > 1 else 0.0)
+            self.drop = nn.Dropout(dropout)
+            self.fc = nn.Linear(hidden_size, 1)
+
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            last = self.drop(out[:, -1, :])
+            return self.fc(last).squeeze(-1)
+
+
+    class LSTMSeqClassifier(ClassifierMixin, BaseEstimator):
+        """
+        🆕 v9: طبقه‌بند LSTM سازگار با sklearn (fit/predict_proba/clone) تا
+        بتواند مثل بقیهٔ مدل‌ها داخل تورنومنت، Stacking، Voting و OOF
+        refit (CELL 8) استفاده شود.
+
+        بر خلاف مدل‌های دیگر که هر ردیف را مستقل می‌بینند، این مدل روی
+        یک پنجرهٔ متحرکِ `window` روزهٔ فیچرهای اسکیل‌شده آموزش می‌بیند —
+        یعنی واقعاً به توالیِ زمانی (نه فقط مقدار امروز) نگاه می‌کند.
+        نکتهٔ مهم دربارهٔ MRO: ClassifierMixin باید قبل از BaseEstimator
+        بیاید، وگرنه `is_classifier()`/VotingClassifier آن را کلاسیفایر
+        تشخیص نمی‌دهند.
+        """
+
+        def __init__(self, window=20, hidden_size=32, num_layers=1, dropout=0.2,
+                     lr=1e-3, weight_decay=1e-5, max_epochs=60, patience=10,
+                     batch_size=64, random_state=GLOBAL_SEED):
+            self.window = window
+            self.hidden_size = hidden_size
+            self.num_layers = num_layers
+            self.dropout = dropout
+            self.lr = lr
+            self.weight_decay = weight_decay
+            self.max_epochs = max_epochs
+            self.patience = patience
+            self.batch_size = batch_size
+            self.random_state = random_state
+
+        def _make_windows(self, X):
+            """هر ردیف را به یک دنبالهٔ (window, n_features) با نگاه‌فقط‌
+            به‌گذشته تبدیل می‌کند؛ ابتدای سری با تکرارِ اولین ردیف پد
+            می‌شود تا هر ردیفِ ورودی دقیقاً یک خروجی داشته باشد (لازم برای
+            سازگاری با predict_proba روی هر X دلخواه)."""
+            X = np.asarray(X, dtype=np.float32)
+            n, f = X.shape
+            w = self.window
+            pad_n = max(w - 1, 0)
+            pad = np.repeat(X[:1], pad_n, axis=0) if n > 0 else np.zeros((pad_n, f), dtype=np.float32)
+            Xp = np.vstack([pad, X]) if n > 0 else pad
+            seqs = np.stack([Xp[i:i + w] for i in range(n)], axis=0)
+            return seqs.astype(np.float32)
+
+        def fit(self, X, y):
+            torch.manual_seed(self.random_state)
+            X = np.asarray(X); y = np.asarray(y, dtype=np.float32)
+            seqs = self._make_windows(X)
+            n = len(seqs)
+            n_val = max(int(n * 0.15), 1)
+            Xtr_t = torch.tensor(seqs[:n - n_val]); ytr_t = torch.tensor(y[:n - n_val])
+            Xvl_t = torch.tensor(seqs[n - n_val:]); yvl_t = torch.tensor(y[n - n_val:])
+
+            net = _LSTMNet(X.shape[1], self.hidden_size, self.num_layers, self.dropout)
+            opt = torch.optim.Adam(net.parameters(), lr=self.lr,
+                                    weight_decay=self.weight_decay)
+            lossf = nn.BCEWithLogitsLoss()
+
+            best_val, best_state, bad = float('inf'), None, 0
+            n_tr = len(Xtr_t)
+            for _ in range(self.max_epochs):
+                net.train()
+                perm = torch.randperm(n_tr)
+                for i in range(0, n_tr, self.batch_size):
+                    idx = perm[i:i + self.batch_size]
+                    opt.zero_grad()
+                    loss = lossf(net(Xtr_t[idx]), ytr_t[idx])
+                    loss.backward()
+                    opt.step()
+                net.eval()
+                with torch.no_grad():
+                    vloss = lossf(net(Xvl_t), yvl_t).item()
+                if vloss < best_val - 1e-4:
+                    best_val = vloss
+                    best_state = {k: v.clone() for k, v in net.state_dict().items()}
+                    bad = 0
+                else:
+                    bad += 1
+                    if bad >= self.patience:
+                        break
+            if best_state is not None:
+                net.load_state_dict(best_state)
+            net.eval()
+            self.model_ = net
+            self.classes_ = np.array([0, 1])
+            return self
+
+        def predict_proba(self, X):
+            seqs = self._make_windows(X)
+            with torch.no_grad():
+                p1 = torch.sigmoid(self.model_(torch.tensor(seqs))).numpy()
+            p1 = np.clip(p1, 1e-6, 1 - 1e-6)
+            return np.column_stack([1 - p1, p1])
+
+        def predict(self, X):
+            return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
+    def train_lstm(Xtr, ytr, Xvl, yvl, n_trials=20):
+        """
+        🆕 v9: تیونِ LSTM با Optuna — چون هر fit خودش چند ده epoch با
+        early-stopping داخلی دارد، تعداد trial را عمداً کمتر از بقیهٔ
+        مدل‌ها گرفته‌ایم تا زمان اجرای کل تورنومنت منطقی بماند.
+        """
+        def obj(trial):
+            m = LSTMSeqClassifier(
+                window     =trial.suggest_int('window', 10, 40),
+                hidden_size=trial.suggest_int('hs', 16, 96, log=True),
+                num_layers =trial.suggest_int('nl', 1, 2),
+                dropout    =trial.suggest_float('drop', 0.0, 0.5),
+                lr         =trial.suggest_float('lr', 1e-4, 5e-3, log=True),
+                weight_decay=trial.suggest_float('wd', 1e-6, 1e-2, log=True),
+                batch_size =trial.suggest_categorical('bs', [32, 64]),
+                max_epochs=60, patience=8, random_state=GLOBAL_SEED,
+            )
+            m.fit(Xtr, ytr)
+            return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED, multivariate=True))
+        study.optimize(obj, n_trials=n_trials, show_progress_bar=False)
+
+        bp = study.best_params
+        m = LSTMSeqClassifier(
+            window=bp['window'], hidden_size=bp['hs'], num_layers=bp['nl'],
+            dropout=bp['drop'], lr=bp['lr'], weight_decay=bp['wd'],
+            batch_size=bp['bs'], max_epochs=120, patience=15,
+            random_state=GLOBAL_SEED,
+        )
+        m.fit(Xtr, ytr)
+        a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+        return m, a
+
+else:
+    def train_lstm(Xtr, ytr, Xvl, yvl, n_trials=20):
+        raise ImportError(
+            "PyTorch نصب نیست — 'pip install torch' را اجرا کنید یا این مدل "
+            "را از تورنومنت (CELL 7) حذف کنید.")
+
+
 def train_stacking(Xtr, ytr, Xvl, yvl, base_models):
     """StackingClassifier با مدل‌های داده‌شده (لیستی از (نام, مدلِ
     تنظیم‌شده)) به‌عنوان base learner و LogisticRegression به‌عنوان
@@ -1309,22 +1490,24 @@ def train_voting(Xtr, ytr, Xvl, yvl, base_models):
 
 
 print("✅ توابع آموزش مدل‌ها تعریف شدند: LightGBM, XGBoost, RandomForest, "
-      "CatBoost, MLP, StackingClassifier, VotingClassifier")
+      "CatBoost, MLP, LSTM, StackingClassifier, VotingClassifier"
+      + ("" if _TORCH_OK else "  ⚠️ (torch نصب نیست — LSTM غیرفعال است)"))
 
 
 # ============================================================
-#  CELL 7 — Tournament (۷ مدل برای HONEST، بدون Early-Stop — همه اجرا می‌شوند)
+#  CELL 7 — Tournament (۸ مدل برای HONEST، بدون Early-Stop — همه اجرا می‌شوند)
 #  🆕 v8: علاوه بر LightGBM/XGBoost/RandomForest، حالا CatBoost و MLP هم
-#  اجرا می‌شوند؛ Stacking/Voting به‌جای «همیشه lgbm+xgb+rf»، از بهترین
-#  ۴ مدلِ منفرد (طبق Val AUC هر سهم) ساخته می‌شوند — یعنی برای هر سهم
-#  ممکن است ترکیب پایه‌ی متفاوتی انتخاب شود.
+#  اجرا می‌شوند. 🆕 v9: LSTM (مدل سری‌زمانیِ دنباله‌ای) هم اضافه شد.
+#  Stacking/Voting به‌جای «همیشه lgbm+xgb+rf»، از بهترین ۵ مدلِ منفرد
+#  (طبق Val AUC هر سهم) ساخته می‌شوند — یعنی برای هر سهم ممکن است
+#  ترکیب پایه‌ی متفاوتی انتخاب شود.
 # ============================================================
 all_models      = {}
 tournament_aucs = {}
 
 print("\n" + "=" * 70)
 print("  TOURNAMENT — LightGBM / XGBoost / RandomForest / CatBoost / MLP / "
-      "Stacking / Voting")
+      "LSTM / Stacking / Voting")
 print("=" * 70)
 
 for name, data in prepared.items():
@@ -1363,20 +1546,29 @@ for name, data in prepared.items():
     mdls['mlp'] = mlp_m; aucs['mlp'] = mlp_a
     print(f"     AUC={mlp_a:.4f}  ({time.time()-t1:.0f}s)")
 
-    # 🆕 v8: بهترین ۴ مدلِ منفرد (طبق Val AUC) پایهٔ Stacking/Voting می‌شوند
+    if _TORCH_OK:
+        t1 = time.time()
+        print("  ⑥ LSTM (شبکهٔ عصبی بازگشتیِ دنباله‌ای، 20 trials Optuna)...")
+        lstm_m, lstm_a = train_lstm(Xtr, ytr, Xvl, yvl, n_trials=20)
+        mdls['lstm'] = lstm_m; aucs['lstm'] = lstm_a
+        print(f"     AUC={lstm_a:.4f}  ({time.time()-t1:.0f}s)")
+    else:
+        print("  ⑥ LSTM  ⚠️ رد شد (torch نصب نیست)")
+
+    # 🆕 v9: بهترین ۵ مدلِ منفرد (طبق Val AUC) پایهٔ Stacking/Voting می‌شوند
     solo_aucs = {k: v for k, v in aucs.items()}
-    top4_solo = sorted(solo_aucs.items(), key=lambda x: -x[1])[:4]
-    base_for_ensemble = [(nm, mdls[nm]) for nm, _ in top4_solo]
-    base_names_str = " + ".join(nm for nm, _ in top4_solo)
+    top5_solo = sorted(solo_aucs.items(), key=lambda x: -x[1])[:5]
+    base_for_ensemble = [(nm, mdls[nm]) for nm, _ in top5_solo]
+    base_names_str = " + ".join(nm for nm, _ in top5_solo)
 
     t1 = time.time()
-    print(f"  ⑥ StackingClassifier ({base_names_str} → LogisticRegression)...")
+    print(f"  ⑦ StackingClassifier ({base_names_str} → LogisticRegression)...")
     stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, base_for_ensemble)
     mdls['stacking'] = stack_m; aucs['stacking'] = stack_a
     print(f"     AUC={stack_a:.4f}  ({time.time()-t1:.0f}s)")
 
     t1 = time.time()
-    print(f"  ⑦ VotingClassifier (soft, {base_names_str})...")
+    print(f"  ⑧ VotingClassifier (soft, {base_names_str})...")
     vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, base_for_ensemble)
     mdls['voting'] = vote_m; aucs['voting'] = vote_a
     print(f"     AUC={vote_a:.4f}  ({time.time()-t1:.0f}s)")
@@ -1395,12 +1587,12 @@ for name, data in prepared.items():
     print(f"  ✅ {name}  ({time.time()-t0:.0f}s total)")
     gc.collect()
 
-print("\n✅ Tournament complete (۷ مدل، بدون حذف)")
+print("\n✅ Tournament complete (۸ مدل، بدون حذف)")
 
 
 # ============================================================
 #  CELL 8 — Two-Level Stacking + Calibration + BMA
-#  (روی خروجی احتمالِ مدل‌های تورنومنتِ CELL 7 — ۷تا برای HONEST، ۵تا برای FRAUD)
+#  (روی خروجی احتمالِ مدل‌های تورنومنتِ CELL 7 — ۸تا برای HONEST، ۵تا برای FRAUD)
 # ============================================================
 from sklearn.linear_model   import LogisticRegression, RidgeClassifier
 from sklearn.calibration    import CalibratedClassifierCV
@@ -1524,7 +1716,7 @@ def get_oof_meta_features(mdls, model_names, X_trval, y_trval, n_splits=5):
     return oof, valid_mask
 
 
-STACK_MODELS = ['lgbm', 'xgb', 'rf', 'catboost', 'mlp', 'stacking', 'voting']
+STACK_MODELS = ['lgbm', 'xgb', 'rf', 'catboost', 'mlp', 'lstm', 'stacking', 'voting']
 # 🆕 v8: در FRAUD (که catboost/mlp اصلاً ساخته نمی‌شوند) این لیست خودکار
 # با فیلترِ «[m for m in STACK_MODELS if m in mdls]» به همان ۵ مدل قبلی
 # محدود می‌شود — نیازی به شاخه‌بندی جدا نیست.
@@ -2933,9 +3125,10 @@ print(f"""
 ============================================================================
   جمع‌بندی نهایی برای کلاس:
 ============================================================================
-  HONEST از میان ۷ مدل (LightGBM, XGBoost, RandomForest, CatBoost, MLP,
-  StackingClassifier, VotingClassifier) و FRAUD از میان همان ۵ مدلِ اصلیِ
-  پیشین (بدون CatBoost/MLP) بهترین را برای هر سهم انتخاب کرده‌اند.
+  HONEST از میان ۸ مدل (LightGBM, XGBoost, RandomForest, CatBoost, MLP,
+  LSTM, StackingClassifier, VotingClassifier) و FRAUD از میان همان ۵
+  مدلِ اصلیِ پیشین (بدون CatBoost/MLP/LSTM) بهترین را برای هر سهم
+  انتخاب کرده‌اند.
   با این‌حال AUC نسخهٔ FRAUD همچنان بالاتر می‌ماند — یعنی نشتِ داده
   حتی از یک مجموعهٔ مدلِ به‌مراتب قوی‌تر هم مؤثرتر است. مقایسهٔ ستون
   «Top Model» نشان می‌دهد که حتی انتخاب «بهترین مدل» هم می‌تواند در دو
@@ -2946,4 +3139,4 @@ print(f"""
 ============================================================================
 """)
 
-print("✅ Pipeline کامل (HONEST با ۷ مدل + FRAUD با همان ۵ مدل قبلی) کامل شد!")
+print("✅ Pipeline کامل (HONEST با ۸ مدل + FRAUD با همان ۵ مدل قبلی) کامل شد!")
