@@ -1,8 +1,42 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v15)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v17)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
+#
+#  🆕 v17 — مدلِ نهم: CNN-LSTM. تا این‌جا تنها مدلِ سری‌زمانیِ اختصاصی
+#  LSTM+Attention بود که مستقیماً روی فیچرهای اسکیل‌شدهٔ هر روزِ پنجره کار
+#  می‌کرد. اکنون یک لایهٔ Conv1d علّی (فقط داخلِ همان پنجرهٔ تاریخیِ بسته‌شده،
+#  بدون نگاه به آینده؛ کرنل همیشه فرد و padding='same' تا طولِ دنباله تغییر
+#  نکند) پیش از LSTM اضافه شده — معماریِ استانداردِ CNN-LSTM که ابتدا
+#  الگوهای محلیِ کوتاه‌مدت (شبیهِ یک الگوی چند-کندلی) را استخراج می‌کند،
+#  سپس LSTM+Attention روی دنبالهٔ حاصل تصمیم می‌گیرد. به‌جای یک کلاسِ کاملاً
+#  جدید، همان `LSTMSeqClassifier`/`_LSTMNet` با پرچمِ `use_cnn` گسترش یافت
+#  (و `train_cnn_lstm` به‌عنوان تابعِ تیونِ Optuna جداگانه اضافه شد) تا
+#  منطقِ windowing/early-stopping/clone_for_refit عیناً و بدون دوباره‌نویسی
+#  به ارث برسد. مدلِ جدید (`cnn_lstm`) دقیقاً مثلِ بقیهٔ مدل‌های منفرد وارد
+#  تورنومنتِ CELL 7، کاندیدهای Stacking/Voting، Walk-Forward (CELL 8.5)، و
+#  آزمایشِ کاهشِ فیچر (CELL 10.8) می‌شود — نه یک مسیرِ جداگانه؛ اگر روی یک
+#  سهم واقعاً از LSTM/گرادیان‌بوستینگ‌ها بهتر عمل نکند، همین‌طور صادقانه
+#  گزارش می‌شود (FRAUD همچنان این مدل را ندارد، طبق طراحیِ اصلیِ ۵-مدلی‌اش).
+#
+#  🆕 v16 — فیچرِ کلانِ نرخِ دلارِ آزاد: تا این‌جا تمامِ ۹۶ فیچر فقط از
+#  خودِ قیمت/حجمِ سهم ساخته می‌شدند — هیچ متغیرِ کلانِ اقتصادی وجود نداشت،
+#  با این‌که سهم‌های این نمونه (فملی/فولاد/شپنا) عمدتاً صادرات‌محورند و
+#  سودشان مستقیم به نرخِ ارز وابسته است. اکنون ۴ فیچرِ جدید
+#  (`usd_ret`, `usd_ret20`, `usd_vol20`, `usd_dev_sma50` — CELL 4، بلافاصله
+#  بعد از market_ret/market_vol) از نرخِ دلارِ آزاد ساخته می‌شوند؛ عمداً
+#  فقط بازده/انحرافِ کوتاه‌مدت گرفته شده، نه سطحِ خامِ دلار (که در این بازه
+#  یک روندِ تقریباً یک‌طرفه است و می‌تواند صرفاً «زمان» را نشت بدهد، نه
+#  سیگنالِ معاملاتیِ واقعی). دادهٔ نرخِ ارز از دیتاستِ عمومیِ
+#  `Dollar-Rial-Toman-Live-Price-Dataset` (منبعِ اصلی: TGJU.org) به
+#  `data/USD_IRR.csv` تبدیل شده و به‌صورتِ اختیاری بارگذاری می‌شود
+#  (CELL 3.4) — نبودِ فایل کرش نمی‌کند، فقط این ۴ فیچر صفر می‌مانند.
+#  یک فیچرِ خواسته‌شدهٔ دوم (ورود/خروجِ پولِ حقیقی/حقوقی، از TSETMC) به‌خاطرِ
+#  بلاک‌بودنِ دسترسیِ شبکه به tsetmc.com/tse.ir در محیطِ اجرای این کد اضافه
+#  نشد — به‌جای جعل یا تقریب‌زدنِ این داده، به‌طورِ صریح کنار گذاشته شد؛
+#  اگر این داده بعداً از منبعِ دیگری در دسترس قرار گرفت، می‌توان با همین
+#  الگو (بارگذاریِ اختیاری + reindex/ffill بدونِ نگاه‌به‌آینده) اضافه‌اش کرد.
 #
 #  🆕 v15 — تورنمنتِ چند-افقی + انتخابِ افق روی Walk-Forward: تا این‌جا
 #  HOLD_DAYS=5 (هم افقِ target و هم طولِ فرضیِ آپشن در بک‌تست) یک انتخابِ
@@ -260,7 +294,8 @@ if os.path.isdir(FP):
             if nm not in ASSET_NAMES and nm not in ['thesis_table_final',
                     'FRAUD_thesis_table_final', 'CLASSROOM_ONLY_full_honest_vs_fraud',
                     'portfolio_optimization', 'FRAUD_portfolio_optimization',
-                    'feature_pruning_comparison', 'horizon_selection_summary']:
+                    'feature_pruning_comparison', 'horizon_selection_summary',
+                    'USD_IRR']:
                 print(f"➕  فایل اضافه پیدا شد و به لیست نمادها اضافه شد: {nm}")
                 ASSET_NAMES.append(nm)
 
@@ -366,6 +401,26 @@ for name, df in processed.items():
     filtered[name] = df
     print(f"  {name}: {len(df)} days")
 print("✅ Filtered")
+
+
+# ============================================================================
+#  CELL 3.4 — 🆕 v16: فیچرِ کلانِ نرخِ دلارِ آزاد
+#  تنها فیچرِ کلانِ خارج از خودِ قیمتِ سهم در این پروژه. منبع: دیتاستِ عمومیِ
+#  gitHub «Dollar-Rial-Toman-Live-Price-Dataset» (خودش از TGJU.org جمع‌آوری
+#  شده)، تمیزشده و به data/USD_IRR.csv (ستون‌های date, usd_close) تبدیل شده.
+#  اگر فایل موجود نباشد، پایپ‌لاین به‌جای کرش‌کردن با هشدار ادامه می‌دهد و
+#  فیچرهای usd_* صفر می‌مانند — این یک افزودهٔ اختیاری است، نه یک وابستگیِ
+#  سخت.
+# ============================================================================
+usd_close_raw = None
+try:
+    _usd_df = pd.read_csv(FP + 'USD_IRR.csv', parse_dates=['date']).set_index('date').sort_index()
+    usd_close_raw = _usd_df['usd_close']
+    print(f"✅ نرخِ دلار بارگذاری شد: {usd_close_raw.index.min().date()} تا "
+          f"{usd_close_raw.index.max().date()} ({len(usd_close_raw)} ردیف)")
+except FileNotFoundError:
+    print("⚠️ data/USD_IRR.csv پیدا نشد — فیچرهای usd_* صفر می‌مانند (این یک "
+          "افزودهٔ اختیاری است، نه وابستگیِ سخت)")
 
 
 # ============================================================
@@ -541,7 +596,11 @@ FEATURES_ADVANCED = [
     'rsi_x_vol', 'macd_x_vol', 'bb_pos_x_rsi',
 ]
 
-FEATURES = FEATURES_BASE + FEATURES_TSETMC + FEATURES_ADVANCED
+FEATURES_MACRO = [  # 🆕 v16: تنها فیچرِ کلانِ خارج از خودِ قیمتِ سهم (نرخِ دلارِ آزاد)
+    'usd_ret', 'usd_ret20', 'usd_vol20', 'usd_dev_sma50',
+]
+
+FEATURES = FEATURES_BASE + FEATURES_TSETMC + FEATURES_ADVANCED + FEATURES_MACRO
 
 
 def rsi_calc(s, w=14):
@@ -683,9 +742,11 @@ def amihud_illiquidity(ret, vol, window=20):
     return ratio.rolling(window).mean() * 1e6
 
 
-def add_features(df, mrt, mvt, hold_days=None):
+def add_features(df, mrt, mvt, hold_days=None, usd=None):
     """🆕 v15: hold_days افقِ target/ret_5d را کنترل می‌کند (پیش‌فرض: HOLD_DAYS
-    سراسری، برای سازگاری با فراخوانی‌های قدیمی/FRAUD که افق ثابت می‌خواهند)."""
+    سراسری، برای سازگاری با فراخوانی‌های قدیمی/FRAUD که افق ثابت می‌خواهند).
+    🆕 v16: usd سریِ نرخِ دلارِ آزاد است (خام، بدونِ reindex قبلی) — اگر None
+    باشد فیچرهای usd_* صفر می‌مانند."""
     hold_days = HOLD_DAYS if hold_days is None else hold_days
     df = df.copy()
     c  = df['close']
@@ -755,6 +816,20 @@ def add_features(df, mrt, mvt, hold_days=None):
     mv = mvt.reindex(df.index).ffill().fillna(0)
     df['market_ret'] = mk
     df['market_vol'] = mv
+
+    # 🆕 v16: فیچرِ کلانِ نرخِ دلارِ آزاد — فقط بازده/انحراف، نه سطحِ خام
+    # (سطحِ خامِ دلار در این بازه یک روندِ صعودیِ تقریباً یک‌طرفه است و
+    # می‌تواند به‌جای الگوی معاملاتی، صرفاً «زمان» را نشت دهد)
+    if usd is not None:
+        usd_c = usd.reindex(df.index).ffill().fillna(0)
+    else:
+        usd_c = pd.Series(0.0, index=df.index)
+    usd_ret_s = usd_c.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
+    usd_sma50 = usd_c.rolling(50).mean()
+    df['usd_ret']       = usd_ret_s
+    df['usd_ret20']     = usd_c.pct_change(20).replace([np.inf, -np.inf], np.nan).fillna(0)
+    df['usd_vol20']     = usd_ret_s.rolling(20).std().fillna(0)
+    df['usd_dev_sma50'] = ((usd_c - usd_sma50) / (usd_sma50 + 1e-8)).fillna(0)
 
     ll14 = lo.rolling(14).min()
     hh14 = h.rolling(14).max()
@@ -1034,7 +1109,7 @@ def _quick_lgbm():
 
 def evaluate_horizon(df_raw, mrf, mvf, h):
     """میانگینِ AUC والک‌فوروارد یک افقِ کاندید را با یک مدلِ سبک/ثابت برمی‌گرداند."""
-    df_feat_h = add_features(df_raw, mrf, mvf, hold_days=h)
+    df_feat_h = add_features(df_raw, mrf, mvf, hold_days=h, usd=usd_close_raw)
     n = len(df_feat_h)
     if n < 200:
         return None
@@ -1139,7 +1214,7 @@ for name, df_raw in filtered.items():
     mvf = mvt.reindex(df_raw.index).ffill().fillna(0)
 
     H = selected_hold_days.get(name, HOLD_DAYS)
-    df_feat = add_features(df_raw, mrf, mvf, hold_days=H)
+    df_feat = add_features(df_raw, mrf, mvf, hold_days=H, usd=usd_close_raw)
 
     for col in FEATURES:
         if col in df_feat.columns:
@@ -1574,11 +1649,25 @@ if _TORCH_OK:
 
     class _LSTMNet(nn.Module):
         def __init__(self, n_features, hidden_size, num_layers, dropout,
-                     bidirectional=False, use_attention=True):
+                     bidirectional=False, use_attention=True,
+                     use_cnn=False, cnn_channels=16, cnn_kernel=3):
+            """🆕 v17: use_cnn=True یک لایهٔ Conv1d علّی (فقط روی همان
+            پنجرهٔ بسته‌شدهٔ تاریخی، بدون نگاه به آینده) قبل از LSTM اضافه
+            می‌کند تا الگوهای محلیِ کوتاه‌مدت (شبیه یک کندل‌استیکِ چندروزه)
+            را استخراج کند و سپس LSTM روی خروجیِ آن دنباله را می‌سازد —
+            معماریِ استانداردِ CNN-LSTM برای سری‌های زمانیِ مالی."""
             super().__init__()
             self.use_attention = use_attention
+            self.use_cnn = use_cnn
+            lstm_in = n_features
+            if use_cnn:
+                self.conv = nn.Conv1d(n_features, cnn_channels,
+                                       kernel_size=cnn_kernel,
+                                       padding=cnn_kernel // 2)
+                self.cnn_act = nn.ReLU()
+                lstm_in = cnn_channels
             self.lstm = nn.LSTM(
-                n_features, hidden_size, num_layers=num_layers, batch_first=True,
+                lstm_in, hidden_size, num_layers=num_layers, batch_first=True,
                 dropout=dropout if num_layers > 1 else 0.0,
                 bidirectional=bidirectional)
             out_size = hidden_size * (2 if bidirectional else 1)
@@ -1588,6 +1677,8 @@ if _TORCH_OK:
             self.fc = nn.Linear(out_size, 1)
 
         def forward(self, x):
+            if self.use_cnn:
+                x = self.cnn_act(self.conv(x.transpose(1, 2))).transpose(1, 2)
             out, _ = self.lstm(x)
             context = self.attn(out) if self.use_attention else out[:, -1, :]
             context = self.drop(context)
@@ -1615,7 +1706,8 @@ if _TORCH_OK:
         def __init__(self, window=20, hidden_size=32, num_layers=1, dropout=0.2,
                      lr=1e-3, weight_decay=1e-5, max_epochs=60, patience=10,
                      batch_size=64, bidirectional=False, use_attention=True,
-                     grad_clip=1.0, random_state=GLOBAL_SEED):
+                     grad_clip=1.0, random_state=GLOBAL_SEED,
+                     use_cnn=False, cnn_channels=16, cnn_kernel=3):
             self.window = window
             self.hidden_size = hidden_size
             self.num_layers = num_layers
@@ -1629,6 +1721,9 @@ if _TORCH_OK:
             self.use_attention = use_attention
             self.grad_clip = grad_clip
             self.random_state = random_state
+            self.use_cnn = use_cnn          # 🆕 v17: CNN-LSTM
+            self.cnn_channels = cnn_channels
+            self.cnn_kernel = cnn_kernel
 
         def _make_windows(self, X):
             """هر ردیف را به یک دنبالهٔ (window, n_features) با نگاه‌فقط‌
@@ -1669,7 +1764,9 @@ if _TORCH_OK:
                 Xvl_t = torch.tensor(seqs[n - n_val:]); yvl_t = torch.tensor(y[n - n_val:])
 
             net = _LSTMNet(X.shape[1], self.hidden_size, self.num_layers, self.dropout,
-                            bidirectional=self.bidirectional, use_attention=self.use_attention)
+                            bidirectional=self.bidirectional, use_attention=self.use_attention,
+                            use_cnn=self.use_cnn, cnn_channels=self.cnn_channels,
+                            cnn_kernel=self.cnn_kernel)
             opt = torch.optim.Adam(net.parameters(), lr=self.lr,
                                     weight_decay=self.weight_decay)
             sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -1761,8 +1858,62 @@ if _TORCH_OK:
         a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
         return m, a
 
+
+    def train_cnn_lstm(Xtr, ytr, Xvl, yvl, n_trials=25):
+        """
+        🆕 v17: مدلِ CNN-LSTM — همان LSTMSeqClassifier، فقط با یک لایهٔ
+        Conv1d علّی (فقط روی همان پنجرهٔ بسته‌شدهٔ تاریخی، بدون نگاه به
+        آینده) پیش از LSTM تا الگوهای محلیِ کوتاه‌مدت (شبیهِ چند-کندلی) را
+        استخراج کند، سپس LSTM+Attention روی خروجیِ آن دنباله تصمیم بگیرد.
+        Optuna علاوه بر هایپرپارامترهای معمولِ LSTM، تعداد کانالِ CNN و
+        سایزِ کرنل را هم می‌سنجد (کرنل همیشه فرد است تا طولِ دنباله بعد
+        از padding='same' تغییر نکند).
+        """
+        def obj(trial):
+            m = LSTMSeqClassifier(
+                window       =trial.suggest_int('window', 10, 40),
+                hidden_size  =trial.suggest_int('hs', 16, 96, log=True),
+                num_layers   =trial.suggest_int('nl', 1, 2),
+                dropout      =trial.suggest_float('drop', 0.0, 0.5),
+                lr           =trial.suggest_float('lr', 1e-4, 5e-3, log=True),
+                weight_decay =trial.suggest_float('wd', 1e-6, 1e-2, log=True),
+                batch_size   =trial.suggest_categorical('bs', [32, 64]),
+                bidirectional=trial.suggest_categorical('bidir', [False, True]),
+                use_attention=trial.suggest_categorical('attn', [False, True]),
+                grad_clip    =trial.suggest_float('clip', 0.5, 5.0),
+                use_cnn=True,
+                cnn_channels =trial.suggest_int('cnn_ch', 8, 64, log=True),
+                cnn_kernel   =trial.suggest_categorical('cnn_k', [3, 5, 7]),
+                max_epochs=80, patience=10, random_state=GLOBAL_SEED,
+            )
+            m.fit(Xtr, ytr, X_val=Xvl, y_val=yvl)
+            return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED, multivariate=True))
+        study.optimize(obj, n_trials=n_trials, show_progress_bar=False)
+
+        bp = study.best_params
+        m = LSTMSeqClassifier(
+            window=bp['window'], hidden_size=bp['hs'], num_layers=bp['nl'],
+            dropout=bp['drop'], lr=bp['lr'], weight_decay=bp['wd'],
+            batch_size=bp['bs'], bidirectional=bp['bidir'], use_attention=bp['attn'],
+            grad_clip=bp['clip'], use_cnn=True,
+            cnn_channels=bp['cnn_ch'], cnn_kernel=bp['cnn_k'],
+            max_epochs=150, patience=18, random_state=GLOBAL_SEED,
+        )
+        m.fit(Xtr, ytr, X_val=Xvl, y_val=yvl)
+        a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
+        return m, a
+
 else:
     def train_lstm(Xtr, ytr, Xvl, yvl, n_trials=25):
+        raise ImportError(
+            "PyTorch نصب نیست — 'pip install torch' را اجرا کنید یا این مدل "
+            "را از تورنومنت (CELL 7) حذف کنید.")
+
+    def train_cnn_lstm(Xtr, ytr, Xvl, yvl, n_trials=25):
         raise ImportError(
             "PyTorch نصب نیست — 'pip install torch' را اجرا کنید یا این مدل "
             "را از تورنومنت (CELL 7) حذف کنید.")
@@ -1794,14 +1945,15 @@ def train_voting(Xtr, ytr, Xvl, yvl, base_models):
 
 
 print("✅ توابع آموزش مدل‌ها تعریف شدند: LightGBM, XGBoost, RandomForest, "
-      "CatBoost, MLP, LSTM, StackingClassifier, VotingClassifier"
-      + ("" if _TORCH_OK else "  ⚠️ (torch نصب نیست — LSTM غیرفعال است)"))
+      "CatBoost, MLP, LSTM, CNN-LSTM, StackingClassifier, VotingClassifier"
+      + ("" if _TORCH_OK else "  ⚠️ (torch نصب نیست — LSTM/CNN-LSTM غیرفعال‌اند)"))
 
 
 # ============================================================
-#  CELL 7 — Tournament (۸ مدل برای HONEST، بدون Early-Stop — همه اجرا می‌شوند)
+#  CELL 7 — Tournament (۹ مدل برای HONEST، بدون Early-Stop — همه اجرا می‌شوند)
 #  🆕 v8: علاوه بر LightGBM/XGBoost/RandomForest، حالا CatBoost و MLP هم
 #  اجرا می‌شوند. 🆕 v9: LSTM (مدل سری‌زمانیِ دنباله‌ای) هم اضافه شد.
+#  🆕 v17: CNN-LSTM (استخراجِ فیچرِ محلی با Conv1d پیش از LSTM) هم اضافه شد.
 #  Stacking/Voting به‌جای «همیشه lgbm+xgb+rf»، از بهترین ۵ مدلِ منفرد
 #  (طبق Val AUC هر سهم) ساخته می‌شوند — یعنی برای هر سهم ممکن است
 #  ترکیب پایه‌ی متفاوتی انتخاب شود.
@@ -1811,7 +1963,7 @@ tournament_aucs = {}
 
 print("\n" + "=" * 70)
 print("  TOURNAMENT — LightGBM / XGBoost / RandomForest / CatBoost / MLP / "
-      "LSTM / Stacking / Voting")
+      "LSTM / CNN-LSTM / Stacking / Voting")
 print("=" * 70)
 
 for name, data in prepared.items():
@@ -1860,8 +2012,15 @@ for name, data in prepared.items():
         lstm_m, lstm_a = train_lstm(Xtr, ytr, Xvl, yvl, n_trials=25)
         mdls['lstm'] = lstm_m; aucs['lstm'] = lstm_a
         print(f"     AUC={lstm_a:.4f}  ({time.time()-t1:.0f}s)")
+
+        t1 = time.time()
+        print("  ⑦ CNN-LSTM (استخراجِ فیچرِ محلی با Conv1d + LSTM+Attention، 25 trials Optuna)...")
+        cnn_lstm_m, cnn_lstm_a = train_cnn_lstm(Xtr, ytr, Xvl, yvl, n_trials=25)
+        mdls['cnn_lstm'] = cnn_lstm_m; aucs['cnn_lstm'] = cnn_lstm_a
+        print(f"     AUC={cnn_lstm_a:.4f}  ({time.time()-t1:.0f}s)")
     else:
         print("  ⑥ LSTM  ⚠️ رد شد (torch نصب نیست)")
+        print("  ⑦ CNN-LSTM  ⚠️ رد شد (torch نصب نیست)")
 
     # 🆕 v9: بهترین ۵ مدلِ منفرد (طبق Val AUC) پایهٔ Stacking/Voting می‌شوند
     solo_aucs = {k: v for k, v in aucs.items()}
@@ -1870,13 +2029,13 @@ for name, data in prepared.items():
     base_names_str = " + ".join(nm for nm, _ in top5_solo)
 
     t1 = time.time()
-    print(f"  ⑦ StackingClassifier ({base_names_str} → LogisticRegression)...")
+    print(f"  ⑧ StackingClassifier ({base_names_str} → LogisticRegression)...")
     stack_m, stack_a = train_stacking(Xtr, ytr, Xvl, yvl, base_for_ensemble)
     mdls['stacking'] = stack_m; aucs['stacking'] = stack_a
     print(f"     AUC={stack_a:.4f}  ({time.time()-t1:.0f}s)")
 
     t1 = time.time()
-    print(f"  ⑧ VotingClassifier (soft, {base_names_str})...")
+    print(f"  ⑨ VotingClassifier (soft, {base_names_str})...")
     vote_m, vote_a = train_voting(Xtr, ytr, Xvl, yvl, base_for_ensemble)
     mdls['voting'] = vote_m; aucs['voting'] = vote_a
     print(f"     AUC={vote_a:.4f}  ({time.time()-t1:.0f}s)")
@@ -1895,12 +2054,12 @@ for name, data in prepared.items():
     print(f"  ✅ {name}  ({time.time()-t0:.0f}s total)")
     gc.collect()
 
-print("\n✅ Tournament complete (۸ مدل، بدون حذف)")
+print("\n✅ Tournament complete (۹ مدل، بدون حذف)")
 
 
 # ============================================================
 #  CELL 8 — Two-Level Stacking + Calibration + BMA
-#  (روی خروجی احتمالِ مدل‌های تورنومنتِ CELL 7 — ۸تا برای HONEST، ۵تا برای FRAUD)
+#  (روی خروجی احتمالِ مدل‌های تورنومنتِ CELL 7 — ۹تا برای HONEST، ۵تا برای FRAUD)
 # ============================================================
 from sklearn.linear_model   import LogisticRegression, RidgeClassifier
 from sklearn.calibration    import CalibratedClassifierCV
@@ -2026,7 +2185,7 @@ def get_oof_meta_features(mdls, model_names, X_trval, y_trval, n_splits=5, purge
     return oof, valid_mask
 
 
-STACK_MODELS = ['lgbm', 'xgb', 'rf', 'catboost', 'mlp', 'lstm', 'stacking', 'voting']
+STACK_MODELS = ['lgbm', 'xgb', 'rf', 'catboost', 'mlp', 'lstm', 'cnn_lstm', 'stacking', 'voting']
 # 🆕 v8: در FRAUD (که catboost/mlp اصلاً ساخته نمی‌شوند) این لیست خودکار
 # با فیلترِ «[m for m in STACK_MODELS if m in mdls]» به همان ۵ مدل قبلی
 # محدود می‌شود — نیازی به شاخه‌بندی جدا نیست.
@@ -2624,6 +2783,8 @@ for name, data in pruned_prepared.items():
     if _TORCH_OK:
         lstm_m, lstm_a = train_lstm(Xtr, ytr, Xvl, yvl, n_trials=25)
         mdls['lstm'] = lstm_m; aucs['lstm'] = lstm_a
+        cnn_lstm_m, cnn_lstm_a = train_cnn_lstm(Xtr, ytr, Xvl, yvl, n_trials=25)
+        mdls['cnn_lstm'] = cnn_lstm_m; aucs['cnn_lstm'] = cnn_lstm_a
 
     top5 = sorted(aucs.items(), key=lambda x: -x[1])[:5]
     base_for_ensemble = [(nm, mdls[nm]) for nm, _ in top5]
@@ -3824,10 +3985,10 @@ print(f"""
 ============================================================================
   جمع‌بندی نهایی برای کلاس:
 ============================================================================
-  HONEST از میان ۸ مدل (LightGBM, XGBoost, RandomForest, CatBoost, MLP,
-  LSTM, StackingClassifier, VotingClassifier) و FRAUD از میان همان ۵
-  مدلِ اصلیِ پیشین (بدون CatBoost/MLP/LSTM) بهترین را برای هر سهم
-  انتخاب کرده‌اند.
+  HONEST از میان ۹ مدل (LightGBM, XGBoost, RandomForest, CatBoost, MLP,
+  LSTM, CNN-LSTM, StackingClassifier, VotingClassifier) و FRAUD از میان
+  همان ۵ مدلِ اصلیِ پیشین (بدون CatBoost/MLP/LSTM/CNN-LSTM) بهترین را
+  برای هر سهم انتخاب کرده‌اند.
   با این‌حال AUC نسخهٔ FRAUD همچنان بالاتر می‌ماند — یعنی نشتِ داده
   حتی از یک مجموعهٔ مدلِ به‌مراتب قوی‌تر هم مؤثرتر است. مقایسهٔ ستون
   «Top Model» نشان می‌دهد که حتی انتخاب «بهترین مدل» هم می‌تواند در دو
@@ -3838,4 +3999,4 @@ print(f"""
 ============================================================================
 """)
 
-print("✅ Pipeline کامل (HONEST با ۸ مدل + FRAUD با همان ۵ مدل قبلی) کامل شد!")
+print("✅ Pipeline کامل (HONEST با ۹ مدل + FRAUD با همان ۵ مدل قبلی) کامل شد!")
