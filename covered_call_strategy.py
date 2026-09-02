@@ -1,8 +1,20 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v12)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v13)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
+#
+#  🆕 v13 — تقویتِ معماریِ LSTM (تنها مدلِ سری‌زمانیِ اختصاصیِ این
+#  پروژه): اضافه‌شدنِ مکانیزمِ Attention (به‌جای این‌که فقط آخرین روزِ
+#  پنجره ملاک باشد، مدل یاد می‌گیرد کدام روزها مهم‌ترند)، گزینهٔ LSTM
+#  دوطرفه (کاملاً داخل همان پنجرهٔ تاریخی، بدون نگاه به آینده)،
+#  Gradient Clipping و زمان‌بندیِ نرخِ یادگیری برای پایداریِ آموزش، و
+#  مهم‌تر از همه: Early Stopping اکنون از همان Val واقعیِ CELL 7
+#  استفاده می‌کند (نه یک برشِ داخلیِ کوچک از Train) — دقیقاً هم‌راستا
+#  با بقیهٔ مدل‌ها. تعداد trial از ۲۰ به ۲۵ رسید. همهٔ این‌ها فقط
+#  کیفیتِ مهندسیِ خودِ LSTM را بالا می‌برد، نتیجهٔ نهایی هرچه باشد
+#  (بهتر یا بی‌تغییر نسبت به گرادیان‌بوستینگ‌ها) صادقانه گزارش می‌شود —
+#  نه تضمینی که LSTM حتماً برنده شود.
 #
 #  🆕 v11 — دو افزودهٔ روش‌شناختی که «قطعاً» چیزی را خراب نمی‌کنند و
 #  به‌طور معقول احتمالِ نتیجهٔ بهتر/معتبرتر را بالا می‌برند:
@@ -220,7 +232,8 @@ if os.path.isdir(FP):
             nm = fn[:-4]
             if nm not in ASSET_NAMES and nm not in ['thesis_table_final',
                     'FRAUD_thesis_table_final', 'CLASSROOM_ONLY_full_honest_vs_fraud',
-                    'portfolio_optimization', 'FRAUD_portfolio_optimization']:
+                    'portfolio_optimization', 'FRAUD_portfolio_optimization',
+                    'feature_pruning_comparison']:
                 print(f"➕  فایل اضافه پیدا شد و به لیست نمادها اضافه شد: {nm}")
                 ASSET_NAMES.append(nm)
 
@@ -1375,33 +1388,68 @@ def train_mlp(Xtr, ytr, Xvl, yvl, n_trials=30):
 
 # ------------------------------------------------------------------
 # 🆕 v9 — LSTM: مدل یادگیری‌عمیقِ دنباله‌ای واقعی (نه فقط ردیف‌به‌ردیف)
+# 🆕 v13 — تقویتِ LSTM: مکانیزمِ Attention، LSTM دوطرفه (اختیاری، فقط
+# داخلِ همان پنجرهٔ تاریخی — نه نگاه به آینده)، Gradient Clipping،
+# زمان‌بندیِ نرخِ یادگیری (ReduceLROnPlateau)، و مهم‌تر از همه: اکنون
+# Early Stopping از همان Val واقعیِ CELL 7 استفاده می‌کند (نه یک برشِ
+# داخلیِ کوچک از Train) — دقیقاً هم‌راستا با LightGBM/XGBoost/CatBoost
+# که از قبل eval_set=(Xvl, yvl) دارند. وقتی این مدل بعداً برای
+# Stacking/Voting/OOF/Walk-Forward با clone_for_refit دوباره فیت شود
+# (بدون دسترسی به Val واقعی)، خودکار به همان روشِ قبلی (برشِ داخلی از
+# Train) سقوط می‌کند — کاملاً سازگار با عقب.
 # ------------------------------------------------------------------
 if _TORCH_OK:
 
-    class _LSTMNet(nn.Module):
-        def __init__(self, n_features, hidden_size, num_layers, dropout):
+    class _Attention(nn.Module):
+        """Additive Attention روی خروجیِ همهٔ گام‌های زمانیِ LSTM — به‌جای
+        این‌که فقط آخرین گام را ملاک تصمیم بگیریم، مدل یاد می‌گیرد کدام
+        روزهای پنجره برای این پیش‌بینیِ خاص مهم‌ترند."""
+        def __init__(self, hidden_size):
             super().__init__()
+            self.score = nn.Linear(hidden_size, 1)
+
+        def forward(self, lstm_out):  # (batch, seq, hidden)
+            scores  = self.score(lstm_out).squeeze(-1)              # (batch, seq)
+            weights = torch.softmax(scores, dim=1)                  # (batch, seq)
+            context = (lstm_out * weights.unsqueeze(-1)).sum(dim=1) # (batch, hidden)
+            return context
+
+
+    class _LSTMNet(nn.Module):
+        def __init__(self, n_features, hidden_size, num_layers, dropout,
+                     bidirectional=False, use_attention=True):
+            super().__init__()
+            self.use_attention = use_attention
             self.lstm = nn.LSTM(
                 n_features, hidden_size, num_layers=num_layers, batch_first=True,
-                dropout=dropout if num_layers > 1 else 0.0)
+                dropout=dropout if num_layers > 1 else 0.0,
+                bidirectional=bidirectional)
+            out_size = hidden_size * (2 if bidirectional else 1)
+            if use_attention:
+                self.attn = _Attention(out_size)
             self.drop = nn.Dropout(dropout)
-            self.fc = nn.Linear(hidden_size, 1)
+            self.fc = nn.Linear(out_size, 1)
 
         def forward(self, x):
             out, _ = self.lstm(x)
-            last = self.drop(out[:, -1, :])
-            return self.fc(last).squeeze(-1)
+            context = self.attn(out) if self.use_attention else out[:, -1, :]
+            context = self.drop(context)
+            return self.fc(context).squeeze(-1)
 
 
     class LSTMSeqClassifier(ClassifierMixin, BaseEstimator):
         """
-        🆕 v9: طبقه‌بند LSTM سازگار با sklearn (fit/predict_proba/clone) تا
-        بتواند مثل بقیهٔ مدل‌ها داخل تورنومنت، Stacking، Voting و OOF
-        refit (CELL 8) استفاده شود.
+        🆕 v9/v13: طبقه‌بند LSTM+Attention سازگار با sklearn
+        (fit/predict_proba/clone) تا بتواند مثل بقیهٔ مدل‌ها داخل
+        تورنومنت، Stacking، Voting و OOF refit (CELL 8) استفاده شود.
 
         بر خلاف مدل‌های دیگر که هر ردیف را مستقل می‌بینند، این مدل روی
         یک پنجرهٔ متحرکِ `window` روزهٔ فیچرهای اسکیل‌شده آموزش می‌بیند —
         یعنی واقعاً به توالیِ زمانی (نه فقط مقدار امروز) نگاه می‌کند.
+        `bidirectional=True` یعنی LSTM از هر دو جهت *داخلِ همان پنجرهٔ
+        تاریخیِ بسته‌شده* پردازش می‌کند (نه نگاه به روزهای بعد از t —
+        کل پنجره از قبل مربوط به گذشته است، پس این هیچ نشتی ایجاد
+        نمی‌کند).
         نکتهٔ مهم دربارهٔ MRO: ClassifierMixin باید قبل از BaseEstimator
         بیاید، وگرنه `is_classifier()`/VotingClassifier آن را کلاسیفایر
         تشخیص نمی‌دهند.
@@ -1409,7 +1457,8 @@ if _TORCH_OK:
 
         def __init__(self, window=20, hidden_size=32, num_layers=1, dropout=0.2,
                      lr=1e-3, weight_decay=1e-5, max_epochs=60, patience=10,
-                     batch_size=64, random_state=GLOBAL_SEED):
+                     batch_size=64, bidirectional=False, use_attention=True,
+                     grad_clip=1.0, random_state=GLOBAL_SEED):
             self.window = window
             self.hidden_size = hidden_size
             self.num_layers = num_layers
@@ -1419,6 +1468,9 @@ if _TORCH_OK:
             self.max_epochs = max_epochs
             self.patience = patience
             self.batch_size = batch_size
+            self.bidirectional = bidirectional
+            self.use_attention = use_attention
+            self.grad_clip = grad_clip
             self.random_state = random_state
 
         def _make_windows(self, X):
@@ -1435,18 +1487,36 @@ if _TORCH_OK:
             seqs = np.stack([Xp[i:i + w] for i in range(n)], axis=0)
             return seqs.astype(np.float32)
 
-        def fit(self, X, y):
+        def fit(self, X, y, X_val=None, y_val=None):
+            """
+            🆕 v13: اگر X_val/y_val پاس داده شود (فقط تورنومنتِ اصلیِ CELL 7
+            این کار را می‌کند)، Early Stopping از همان Val واقعی استفاده
+            می‌کند — دقیقاً مثل بقیهٔ مدل‌ها. وقتی این متد بدون X_val صدا
+            زده شود (مثلاً از داخل Stacking/Voting/OOF/Walk-Forward که
+            دسترسی به Val واقعی ندارند)، خودکار به یک برشِ ۱۵٪ از انتهای
+            Train برای Early Stopping سقوط می‌کند — رفتار قبلی حفظ می‌شود.
+            """
             torch.manual_seed(self.random_state)
             X = np.asarray(X); y = np.asarray(y, dtype=np.float32)
             seqs = self._make_windows(X)
-            n = len(seqs)
-            n_val = max(int(n * 0.15), 1)
-            Xtr_t = torch.tensor(seqs[:n - n_val]); ytr_t = torch.tensor(y[:n - n_val])
-            Xvl_t = torch.tensor(seqs[n - n_val:]); yvl_t = torch.tensor(y[n - n_val:])
 
-            net = _LSTMNet(X.shape[1], self.hidden_size, self.num_layers, self.dropout)
+            if X_val is not None and y_val is not None:
+                Xtr_t = torch.tensor(seqs)
+                ytr_t = torch.tensor(y)
+                Xvl_t = torch.tensor(self._make_windows(np.asarray(X_val)))
+                yvl_t = torch.tensor(np.asarray(y_val, dtype=np.float32))
+            else:
+                n = len(seqs)
+                n_val = max(int(n * 0.15), 1)
+                Xtr_t = torch.tensor(seqs[:n - n_val]); ytr_t = torch.tensor(y[:n - n_val])
+                Xvl_t = torch.tensor(seqs[n - n_val:]); yvl_t = torch.tensor(y[n - n_val:])
+
+            net = _LSTMNet(X.shape[1], self.hidden_size, self.num_layers, self.dropout,
+                            bidirectional=self.bidirectional, use_attention=self.use_attention)
             opt = torch.optim.Adam(net.parameters(), lr=self.lr,
                                     weight_decay=self.weight_decay)
+            sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                opt, mode='min', factor=0.5, patience=max(3, self.patience // 3))
             lossf = nn.BCEWithLogitsLoss()
 
             best_val, best_state, bad = float('inf'), None, 0
@@ -1459,10 +1529,12 @@ if _TORCH_OK:
                     opt.zero_grad()
                     loss = lossf(net(Xtr_t[idx]), ytr_t[idx])
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), self.grad_clip)
                     opt.step()
                 net.eval()
                 with torch.no_grad():
                     vloss = lossf(net(Xvl_t), yvl_t).item()
+                sched.step(vloss)
                 if vloss < best_val - 1e-4:
                     best_val = vloss
                     best_state = {k: v.clone() for k, v in net.state_dict().items()}
@@ -1489,24 +1561,30 @@ if _TORCH_OK:
             return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
 
-    def train_lstm(Xtr, ytr, Xvl, yvl, n_trials=20):
+    def train_lstm(Xtr, ytr, Xvl, yvl, n_trials=25):
         """
-        🆕 v9: تیونِ LSTM با Optuna — چون هر fit خودش چند ده epoch با
-        early-stopping داخلی دارد، تعداد trial را عمداً کمتر از بقیهٔ
-        مدل‌ها گرفته‌ایم تا زمان اجرای کل تورنومنت منطقی بماند.
+        🆕 v9/v13: تیونِ LSTM+Attention با Optuna. Early Stopping هر
+        trial از همان Val واقعیِ (Xvl, yvl) استفاده می‌کند — هم برای
+        توقفِ زودهنگام هم برای ارزیابیِ نهاییِ هر trial، دقیقاً مثل
+        بقیهٔ مدل‌ها. چون هر fit خودش چند ده epoch دارد، تعداد trial را
+        عمداً کمتر از بقیهٔ مدل‌ها گرفته‌ایم تا زمان اجرای کل تورنومنت
+        منطقی بماند.
         """
         def obj(trial):
             m = LSTMSeqClassifier(
-                window     =trial.suggest_int('window', 10, 40),
-                hidden_size=trial.suggest_int('hs', 16, 96, log=True),
-                num_layers =trial.suggest_int('nl', 1, 2),
-                dropout    =trial.suggest_float('drop', 0.0, 0.5),
-                lr         =trial.suggest_float('lr', 1e-4, 5e-3, log=True),
-                weight_decay=trial.suggest_float('wd', 1e-6, 1e-2, log=True),
-                batch_size =trial.suggest_categorical('bs', [32, 64]),
-                max_epochs=60, patience=8, random_state=GLOBAL_SEED,
+                window       =trial.suggest_int('window', 10, 40),
+                hidden_size  =trial.suggest_int('hs', 16, 96, log=True),
+                num_layers   =trial.suggest_int('nl', 1, 2),
+                dropout      =trial.suggest_float('drop', 0.0, 0.5),
+                lr           =trial.suggest_float('lr', 1e-4, 5e-3, log=True),
+                weight_decay =trial.suggest_float('wd', 1e-6, 1e-2, log=True),
+                batch_size   =trial.suggest_categorical('bs', [32, 64]),
+                bidirectional=trial.suggest_categorical('bidir', [False, True]),
+                use_attention=trial.suggest_categorical('attn', [False, True]),
+                grad_clip    =trial.suggest_float('clip', 0.5, 5.0),
+                max_epochs=80, patience=10, random_state=GLOBAL_SEED,
             )
-            m.fit(Xtr, ytr)
+            m.fit(Xtr, ytr, X_val=Xvl, y_val=yvl)
             return roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
 
         study = optuna.create_study(
@@ -1518,15 +1596,16 @@ if _TORCH_OK:
         m = LSTMSeqClassifier(
             window=bp['window'], hidden_size=bp['hs'], num_layers=bp['nl'],
             dropout=bp['drop'], lr=bp['lr'], weight_decay=bp['wd'],
-            batch_size=bp['bs'], max_epochs=120, patience=15,
+            batch_size=bp['bs'], bidirectional=bp['bidir'], use_attention=bp['attn'],
+            grad_clip=bp['clip'], max_epochs=150, patience=18,
             random_state=GLOBAL_SEED,
         )
-        m.fit(Xtr, ytr)
+        m.fit(Xtr, ytr, X_val=Xvl, y_val=yvl)
         a = roc_auc_score(yvl, m.predict_proba(Xvl)[:, 1])
         return m, a
 
 else:
-    def train_lstm(Xtr, ytr, Xvl, yvl, n_trials=20):
+    def train_lstm(Xtr, ytr, Xvl, yvl, n_trials=25):
         raise ImportError(
             "PyTorch نصب نیست — 'pip install torch' را اجرا کنید یا این مدل "
             "را از تورنومنت (CELL 7) حذف کنید.")
@@ -1620,8 +1699,8 @@ for name, data in prepared.items():
 
     if _TORCH_OK:
         t1 = time.time()
-        print("  ⑥ LSTM (شبکهٔ عصبی بازگشتیِ دنباله‌ای، 20 trials Optuna)...")
-        lstm_m, lstm_a = train_lstm(Xtr, ytr, Xvl, yvl, n_trials=20)
+        print("  ⑥ LSTM+Attention (شبکهٔ عصبی بازگشتیِ دنباله‌ای، 25 trials Optuna)...")
+        lstm_m, lstm_a = train_lstm(Xtr, ytr, Xvl, yvl, n_trials=25)
         mdls['lstm'] = lstm_m; aucs['lstm'] = lstm_a
         print(f"     AUC={lstm_a:.4f}  ({time.time()-t1:.0f}s)")
     else:
@@ -2275,7 +2354,7 @@ for name, data in pruned_prepared.items():
     mlp_m, mlp_a = train_mlp(Xtr, ytr, Xvl, yvl, n_trials=30)
     mdls['mlp'] = mlp_m; aucs['mlp'] = mlp_a
     if _TORCH_OK:
-        lstm_m, lstm_a = train_lstm(Xtr, ytr, Xvl, yvl, n_trials=20)
+        lstm_m, lstm_a = train_lstm(Xtr, ytr, Xvl, yvl, n_trials=25)
         mdls['lstm'] = lstm_m; aucs['lstm'] = lstm_a
 
     top5 = sorted(aucs.items(), key=lambda x: -x[1])[:5]
