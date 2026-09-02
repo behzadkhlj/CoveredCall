@@ -1,8 +1,19 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v13)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v14)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
+#
+#  🆕 v14 — ایمنی‌سازیِ انتخاب بر اساسِ Walk-Forward: تا نسخهٔ قبل،
+#  Walk-Forward Check فقط یک ابزارِ *تشخیصی* بود — مشکل را نشان می‌داد
+#  ولی هیچ اثری روی جدولِ رسمی نداشت (به همین دلیل در v13 یک انتخابِ
+#  Overfit-شده — LSTM برای Fameli با AUC رسمیِ ۴۴٪ — بدونِ هشدار وارد
+#  جدولِ نهایی شد). اکنون اگر AUC والک‌فوروارد مدلِ برندهٔ CELL 7 به‌طور
+#  مشخص نزدیکِ تصادف باشد (زیرِ ۰.۵۲)، پایپ‌لاین به‌جای آن مدلِ تکی،
+#  خودکار به میانگینِ رتبه‌ایِ (Rank-Average) همهٔ مدل‌های منفرد سقوط
+#  می‌کند — گزینه‌ای که چون از چند مدلِ مستقل ساخته شده، ذاتاً کمتر در
+#  معرضِ Overfit-شدنِ یک مدلِ خاص است. این حلقهٔ «تشخیص → واکنش» را
+#  می‌بندد و پیشنهادِ کاربر در جلسهٔ توسعه بود.
 #
 #  🆕 v13 — تقویتِ معماریِ LSTM (تنها مدلِ سری‌زمانیِ اختصاصیِ این
 #  پروژه): اضافه‌شدنِ مکانیزمِ Attention (به‌جای این‌که فقط آخرین روزِ
@@ -2113,11 +2124,116 @@ for name, data in prepared.items():
         print(f"  {name:12s}: هیچ foldِ معتبری به‌دست نیامد")
 
 print("""
-  ℹ️ این بررسی جایگزینِ گزارشِ رسمی (CELL 8/13) نیست — فقط نشان می‌دهد
-  آیا AUC گزارش‌شده در چند بازهٔ زمانیِ متفاوت هم پایدار می‌ماند یا
-  محصولِ شانسیِ یک تفکیکِ خاص است. انحرافِ‌معیارِ بزرگ یعنی عملکرد به
-  بازهٔ زمانیِ انتخابی حساس است و باید در فصلِ «محدودیت‌ها» ذکر شود.
+  ℹ️ این بررسی به‌تنهایی جایگزینِ گزارشِ رسمی نیست — فقط نشان می‌دهد آیا
+  AUC گزارش‌شده در چند بازهٔ زمانیِ متفاوت هم پایدار می‌ماند یا محصولِ
+  شانسیِ یک تفکیکِ خاص است. از این‌جا به بعد (v14) این بررسی واقعاً روی
+  گزارشِ رسمی هم اثر می‌گذارد — نگاه کنید به بخشِ ایمنی‌سازیِ زیر.
 """)
+
+
+# ============================================================================
+#  🆕 v14 — ایمنی‌سازیِ انتخاب بر اساسِ Walk-Forward
+#  تا این‌جا، Walk-Forward فقط یک ابزارِ *تشخیصی* بود: مشکل را نشان می‌داد
+#  ولی هیچ اثری روی جدولِ رسمی نداشت — دقیقاً به همین دلیل، در v13 یک
+#  انتخابِ Overfit-شده (LSTM برای Fameli، AUC رسمیِ ۴۴٪ زیرِ تصادف) بدونِ
+#  هشدار وارد جدولِ نهایی شد. این‌جا آن حلقه بسته می‌شود: اگر AUC
+#  والک‌فوروارد مدلِ برندهٔ CELL 7 به‌طور مشخص نزدیکِ تصادف باشد (زیرِ
+#  آستانه)، به‌جای اعتمادِ کورکورانه به یک مدلِ تکیِ ممکن‌است-overfit،
+#  پایپ‌لاین خودکار به میانگینِ رتبه‌ایِ (Rank-Average) همهٔ مدل‌های منفرد
+#  سقوط می‌کند — که چون از چند مدلِ مستقل ساخته شده، ذاتاً در برابرِ
+#  overfit-شدنِ یک مدلِ خاص مقاوم‌تر است. آستانه (۰.۵۲) عمداً محافظه‌کارانه
+#  انتخاب شده: با فقط ۳ فولد، حتی یک مدلِ واقعاً بی‌مهارت می‌تواند به‌طورِ
+#  نویزی بینِ ۰.۴۷ تا ۰.۵۳ نوسان کند؛ ۰.۵۲ کمی بالاتر از این نویز است.
+# ============================================================================
+WF_SAFETY_AUC_THRESHOLD = 0.52
+
+print("\n" + "=" * 70)
+print(f"  🆕 WALK-FORWARD SAFETY OVERRIDE (آستانه = {WF_SAFETY_AUC_THRESHOLD})")
+print("=" * 70)
+
+wf_safety_overridden = {}
+for name, data in prepared.items():
+    if name not in walk_forward_results:
+        print(f"  {name:12s}: بدونِ فولدِ معتبرِ Walk-Forward → override نادیده گرفته شد")
+        continue
+
+    wf_mean = float(np.mean(walk_forward_results[name]))
+    if wf_mean >= WF_SAFETY_AUC_THRESHOLD:
+        print(f"  {name:12s}: WF={wf_mean:.4f} ≥ آستانه → انتخابِ CELL 8 پایدار "
+              f"تشخیص داده شد، دست‌نخورده می‌ماند")
+        continue
+
+    old_auc = all_results[name]['AUC']
+    old_method = all_results[name]['method']
+    print(f"  ⚠️ {name:12s}: WF={wf_mean:.4f} < آستانه (روشِ قبلی: {old_method}) → "
+          f"سقوط به Rank-Average همهٔ مدل‌های منفرد")
+
+    Xvl, yvl = data['X_val'], data['y_val']
+    Xte, yte = data['X_test'], data['y_test']
+    solo_names = [mn for mn in tournament_aucs[name].keys()
+                  if mn not in ('stacking', 'voting')]
+
+    safe_proba_val = rank_avg(np.column_stack(
+        [get_proba(all_models[name][mn], mn, Xvl) for mn in solo_names]))
+    safe_proba_test = rank_avg(np.column_stack(
+        [get_proba(all_models[name][mn], mn, Xte) for mn in solo_names]))
+
+    # همان دنبالهٔ استانداردِ CELL 8: کالیبراسیون → بررسیِ flip → انتخابِ آستانه
+    safe_test_cal = calibrate_proba(safe_proba_val, yvl, safe_proba_test, method='isotonic')
+    auc_raw = roc_auc_score(yte, safe_proba_test)
+    auc_cal = roc_auc_score(yte, safe_test_cal)
+    use_cal = auc_cal >= auc_raw - 0.005
+    safe_test_final = safe_test_cal if use_cal else safe_proba_test
+
+    flipped = False
+    if roc_auc_score(yvl, safe_proba_val) < 0.48:
+        safe_test_final = 1 - safe_test_final
+        safe_proba_val  = 1 - safe_proba_val
+        flipped = True
+
+    best_thr = find_threshold_pr(yvl, safe_proba_val)
+    y_pred   = (safe_test_final >= best_thr).astype(int)
+
+    da    = accuracy_score(yte, y_pred) * 100
+    auc   = roc_auc_score(yte, safe_test_final) * 100
+    f1    = f1_score(yte, y_pred, zero_division=0) * 100
+    prec  = precision_score(yte, y_pred, zero_division=0) * 100
+    rec   = recall_score(yte, y_pred, zero_division=0) * 100
+    brier = brier_score_loss(yte, safe_test_final)
+    aps   = average_precision_score(yte, safe_test_final) * 100
+    cm    = confusion_matrix(yte, y_pred)
+
+    all_results[name].update({
+        'y_pred': y_pred, 'proba': safe_test_final,
+        'proba_val': safe_proba_val, 'threshold': best_thr,
+        'DA': da, 'AUC': auc, 'F1': f1, 'Prec': prec, 'Rec': rec,
+        'Brier': brier, 'AP': aps, 'CM': cm, 'flipped': flipped,
+        'method': 'wf_safety_rank_avg', 'calibrated': use_cal,
+    })
+    wf_safety_overridden[name] = {'old_auc': old_auc, 'new_auc': auc, 'wf_mean': wf_mean}
+    print(f"      AUC رسمی: {old_auc:.1f}% → {auc:.1f}%  "
+          f"(روشِ جدید: میانگینِ رتبه‌ای از {len(solo_names)} مدلِ منفرد)")
+
+if wf_safety_overridden:
+    print(f"\n  ℹ️ {len(wf_safety_overridden)} سهم به‌خاطرِ ناپایداریِ Walk-Forward با "
+          f"یک انتخابِ محافظه‌کارانه‌تر جایگزین شدند: "
+          f"{', '.join(wf_safety_overridden.keys())}. جدولِ نهایی (CELL 13) و "
+          f"بک‌تست از همین اعدادِ به‌روزشده استفاده می‌کنند.")
+else:
+    print("\n  ✅ هیچ سهمی نیاز به override نداشت — همهٔ انتخاب‌های CELL 8 در "
+          "Walk-Forward پایدار بودند.")
+
+
+def display_top_model(name):
+    """
+    🆕 v14: نامِ «مدلِ برتر» برای نمایش (نه برای lookup در all_models —
+    عمداً best_model_info[name] دست‌نخورده می‌ماند تا CELL 10.8 و بقیهٔ
+    مصرف‌کننده‌ها بتوانند مدلِ واقعیِ برنده را پیدا کنند؛ این تابع فقط
+    برای ستونِ نمایشیِ «Top Model» override را نشان می‌دهد.
+    """
+    if all_results.get(name, {}).get('method') == 'wf_safety_rank_avg':
+        return 'wf_safety_rank_avg'
+    return best_model_info[name][0][0]
 
 
 # ============================================================
@@ -2873,7 +2989,7 @@ for name in prepared:
     _, m = backtest_results[name]
     final_rows.append({
         'Asset':          name,
-        'Top Model':      best_model_info[name][0][0],
+        'Top Model':      display_top_model(name),
         'Method':         res['method'],
         'Calibrated':     res['calibrated'],
         'DA (%)':         round(res['DA'],   1),
@@ -2912,7 +3028,7 @@ for name, res in all_results.items():
              "⚠️" if res['AUC'] >= 55 else "❌")
     cc_f  = "📈" if m['CC Return (%)'] > 0 else "📉"
     beat  = m['CC Return (%)'] > m['BnH Return (%)']
-    top1  = best_model_info[name][0][0]
+    top1  = display_top_model(name)
     cal_s = "[CAL]" if res['calibrated'] else ""
     print(f"  {flag} {name:12s} [{top1:10s}]{cal_s}: "
           f"DA={res['DA']:.1f}%  AUC={res['AUC']:.1f}%  "
@@ -3521,7 +3637,7 @@ for name in ASSET_NAMES:
     fr = fraud_all_results[name]; _, fm = fraud_backtest_results[name]
     compare_rows.append({
         'Asset': name,
-        '✅ Honest Top Model': best_model_info[name][0][0],
+        '✅ Honest Top Model': display_top_model(name),
         '🚨 Fraud Top Model':  fraud_best_model_info[name][0][0],
         '✅ Honest AUC (%)':  round(h['AUC'], 1),
         '🚨 Fraud AUC (%)':   round(fr['AUC'], 1),
