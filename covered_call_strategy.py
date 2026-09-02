@@ -1,8 +1,24 @@
 # ============================================================
-#  Covered Call Strategy — نسخه پیشرفته (Enhanced v14)
+#  Covered Call Strategy — نسخه پیشرفته (Enhanced v15)
 #  بورس اوراق بهادار تهران
 #  «مدیریت سبد سرمایه‌گذاری پرتفوی از طریق روش اختیار خرید
 #   پوشش داده‌شده با استفاده از یادگیری عمیق»
+#
+#  🆕 v15 — تورنمنتِ چند-افقی + انتخابِ افق روی Walk-Forward: تا این‌جا
+#  HOLD_DAYS=5 (هم افقِ target و هم طولِ فرضیِ آپشن در بک‌تست) یک انتخابِ
+#  کاملاً دلبخواهی بود. اکنون CELL 4.8 به‌ازای هر سهم چند افقِ کاندید
+#  (۳/۵/۱۰/۱۵/۲۰ روز) را با یک مدلِ سبک و ثابت روی چند فولدِ Walk-Forward
+#  می‌سنجد و افقِ برنده را صرفاً بر همان اساس انتخاب می‌کند — نه با
+#  امتحان‌کردنِ چند افق و برداشتنِ بهترین روی Test، که خودش یک نمونهٔ
+#  data snooping می‌بود. افقِ منتخبِ هر سهم سپس در تمامِ pipeline (Purge
+#  Gap، Stacking OOF، Walk-Forward خودِ CELL 8.5، بک‌تست/گیتِ بلک-شولز،
+#  Sharpe/Sortino سالانه‌شده، و بهینه‌سازیِ پرتفوی) به‌طور یکدست جاری
+#  می‌شود؛ ستونِ «Horizon (days)» در جدولِ نهایی (CELL 13) این افق را
+#  به‌ازای هر سهم شفاف نشان می‌دهد. جزئیاتِ کاملِ تورنمنتِ افق (همهٔ
+#  کاندیدها، نه فقط برنده) در horizon_selection_summary.csv ذخیره
+#  می‌شود تا هیچ شبهه‌ی cherry-picking نماند. FRAUD demo (CELL 13.8) و
+#  آزمایشِ Feature-Pruning (CELL 10.8) هم افقِ همان سهم را به ارث
+#  می‌برند تا مقایسه‌ها apples-to-apples بمانند.
 #
 #  🆕 v14 — ایمنی‌سازیِ انتخاب بر اساسِ Walk-Forward: تا نسخهٔ قبل،
 #  Walk-Forward Check فقط یک ابزارِ *تشخیصی* بود — مشکل را نشان می‌داد
@@ -244,7 +260,7 @@ if os.path.isdir(FP):
             if nm not in ASSET_NAMES and nm not in ['thesis_table_final',
                     'FRAUD_thesis_table_final', 'CLASSROOM_ONLY_full_honest_vs_fraud',
                     'portfolio_optimization', 'FRAUD_portfolio_optimization',
-                    'feature_pruning_comparison']:
+                    'feature_pruning_comparison', 'horizon_selection_summary']:
                 print(f"➕  فایل اضافه پیدا شد و به لیست نمادها اضافه شد: {nm}")
                 ASSET_NAMES.append(nm)
 
@@ -667,7 +683,10 @@ def amihud_illiquidity(ret, vol, window=20):
     return ratio.rolling(window).mean() * 1e6
 
 
-def add_features(df, mrt, mvt):
+def add_features(df, mrt, mvt, hold_days=None):
+    """🆕 v15: hold_days افقِ target/ret_5d را کنترل می‌کند (پیش‌فرض: HOLD_DAYS
+    سراسری، برای سازگاری با فراخوانی‌های قدیمی/FRAUD که افق ثابت می‌خواهند)."""
+    hold_days = HOLD_DAYS if hold_days is None else hold_days
     df = df.copy()
     c  = df['close']
     h  = df['high']  if 'high' in df.columns else c
@@ -922,7 +941,7 @@ def add_features(df, mrt, mvt):
     df['macd_x_vol']   = np.sign(df['macd']) * df['vol_ratio20']
     df['bb_pos_x_rsi'] = df['bb_pos'] * (df['rsi'] / 100)
 
-    df['ret_5d'] = c.pct_change(HOLD_DAYS).shift(-HOLD_DAYS)
+    df['ret_5d'] = c.pct_change(hold_days).shift(-hold_days)
 
     for col in FEATURES:
         if col in df.columns:
@@ -957,9 +976,8 @@ print("✅ (CELL 4.5) تابع فیچر آلودهٔ نمایشی تعریف ش�
 
 
 # ============================================================
-#  CELL 5 — تقسیم، target/regime بدون Leakage، مقیاس‌بندی
-#  🆕 v7: Purged Time-Series Split مشترک (زیر) برای جلوگیری از نشتِ
-#  targetِ رو-به-جلو (ret_5d) در مرز Train/Val/Test.
+#  🆕 v7: Purged Time-Series Split مشترک — به‌جای CELL 5 این‌جا تعریف شد
+#  (v15) تا CELL 4.8 هم بتواند از آن برای ارزیابیِ افق‌های کاندید استفاده کند.
 # ============================================================
 from sklearn.preprocessing import RobustScaler
 
@@ -967,11 +985,14 @@ from sklearn.preprocessing import RobustScaler
 def time_split_slices(n, purge=HOLD_DAYS, train_frac=0.70, val_frac=0.85):
     """
     مرزهای Train/Val/Test را با یک Purge Gap برابر با افقِ پیش‌بینیِ
-    target (HOLD_DAYS) بین انتهای هر بخش و ابتدای بخش بعدی برمی‌گرداند.
-    چون ret_5d هر ردیف به ۵ روز جلوتر نگاه می‌کند، بدون این gap چند
+    target (`purge`) بین انتهای هر بخش و ابتدای بخش بعدی برمی‌گرداند.
+    چون targetِ هر ردیف به `purge` روز جلوتر نگاه می‌کند، بدون این gap چند
     ردیفِ آخرِ Train/Val عملاً به قیمت‌های بخش بعدی «دید» داشتند.
     اندازهٔ Test تغییر نمی‌کند (مقایسه‌ها منصفانه می‌مانند)، فقط
     انتهای Train و انتهای Val کمی کوتاه‌تر می‌شوند.
+    🆕 v15: چون افقِ پیش‌بینی اکنون می‌تواند به‌ازای هر سهم فرق کند،
+    `purge` همیشه باید صریحاً (نه با تکیه به مقدارِ پیش‌فرض) برابرِ
+    افقِ همان سهم پاس داده شود.
     """
     t1 = int(n * train_frac)
     t2 = int(n * val_frac)
@@ -981,6 +1002,129 @@ def time_split_slices(n, purge=HOLD_DAYS, train_frac=0.70, val_frac=0.85):
     return train_idx, val_idx, test_idx
 
 
+# ============================================================================
+#  CELL 4.8 — 🆕 v15: تورنمنتِ چند-افقی + انتخاب روی Walk-Forward
+#  تا این‌جا HOLD_DAYS=5 یک انتخابِ کاملاً دلبخواهی بود. این‌جا به‌ازای هر
+#  سهم چند افقِ کاندید امتحان می‌شود و برنده صرفاً بر اساسِ میانگینِ AUC
+#  روی چند فولدِ Walk-Forward (هرگز روی Test) انتخاب می‌شود — دقیقاً همان
+#  انضباطی که برای انتخابِ مدل در CELL 8.5/v14 اعمال شد، این‌جا برای
+#  انتخابِ افق هم تکرار می‌شود تا از data snooping (چند افق را امتحان
+#  کردن و بهترین را روی خودِ تست برداشتن) جلوگیری شود. برای این‌که هزینهٔ
+#  محاسباتی منطقی بماند، این تورنمنت از یک مدلِ سبک و ثابت (LightGBM با
+#  هایپرپارامترهای معقولِ پیش‌فرض، بدونِ Optuna) استفاده می‌کند، نه ۸
+#  مدلِ کاملِ تیون‌شده — تیونِ کاملِ ۸ مدل فقط یک‌بار، روی افقِ برندهٔ هر
+#  سهم، در CELL 6-8.5 انجام می‌شود.
+# ============================================================================
+import lightgbm as lgb
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import roc_auc_score
+
+HORIZON_CANDIDATES = [3, 5, 10, 15, 20]  # روزِ معاملاتی
+HORIZON_WF_SPLITS  = 3
+HORIZON_MIN_MARGIN = 0.003  # افق‌های در این فاصله از بهترین «هم‌سطح» شمرده می‌شوند؛ کوتاه‌ترینِ آن‌ها انتخاب می‌شود (اصلِ ساده‌گرایی)
+
+
+def _quick_lgbm():
+    return lgb.LGBMClassifier(
+        n_estimators=200, max_depth=4, num_leaves=15,
+        learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
+        random_state=GLOBAL_SEED, verbose=-1,
+    )
+
+
+def evaluate_horizon(df_raw, mrf, mvf, h):
+    """میانگینِ AUC والک‌فوروارد یک افقِ کاندید را با یک مدلِ سبک/ثابت برمی‌گرداند."""
+    df_feat_h = add_features(df_raw, mrf, mvf, hold_days=h)
+    n = len(df_feat_h)
+    if n < 200:
+        return None
+
+    tr_sl, _, _ = time_split_slices(n, purge=h)
+    median_ret_train = df_feat_h.iloc[tr_sl]['ret_5d'].median()
+    df_feat_h = df_feat_h.copy()
+    df_feat_h['target'] = (df_feat_h['ret_5d'] > median_ret_train).astype(int)
+
+    tscv = TimeSeriesSplit(n_splits=HORIZON_WF_SPLITS)
+    fold_aucs = []
+    for tr_idx, te_idx in tscv.split(df_feat_h):
+        if len(tr_idx) <= h:
+            continue
+        tr_fold = df_feat_h.iloc[tr_idx[:-h]]   # همان Purge Gap استاندارد
+        te_fold = df_feat_h.iloc[te_idx]
+        if tr_fold['target'].nunique() < 2 or te_fold['target'].nunique() < 2:
+            continue
+        try:
+            sc_fold = RobustScaler().fit(tr_fold[FEATURES])
+            Xtr_f = sc_fold.transform(tr_fold[FEATURES])
+            Xte_f = sc_fold.transform(te_fold[FEATURES])
+            m = _quick_lgbm()
+            m.fit(Xtr_f, tr_fold['target'].values)
+            p_fold = m.predict_proba(Xte_f)[:, 1]
+            fold_aucs.append(roc_auc_score(te_fold['target'].values, p_fold))
+        except Exception:
+            continue
+
+    return float(np.mean(fold_aucs)) if fold_aucs else None
+
+
+print("\n" + "=" * 70)
+print(f"  🆕 HORIZON SELECTION TOURNAMENT (v15) — کاندیدها: {HORIZON_CANDIDATES} روز، "
+      f"انتخاب روی میانگینِ {HORIZON_WF_SPLITS}-فولدِ Walk-Forward")
+print("=" * 70)
+
+selected_hold_days = {}
+horizon_search_log = []
+
+for name, df_raw in filtered.items():
+    all_tr = pd.DataFrame({
+        n: filtered[n]['close'].iloc[:int(len(filtered[n]) * 0.70)]
+        for n in filtered
+    })
+    mrt = all_tr.pct_change().mean(axis=1)
+    mvt = mrt.rolling(20).std()
+    mrf = mrt.reindex(df_raw.index).ffill().fillna(0)
+    mvf = mvt.reindex(df_raw.index).ffill().fillna(0)
+
+    results_h = {}
+    for h in HORIZON_CANDIDATES:
+        wf_auc = evaluate_horizon(df_raw, mrf, mvf, h)
+        horizon_search_log.append({
+            'Asset': name, 'Horizon(days)': h,
+            'WF_AUC': round(wf_auc, 4) if wf_auc is not None else np.nan,
+        })
+        if wf_auc is not None:
+            results_h[h] = wf_auc
+
+    if not results_h:
+        selected_hold_days[name] = HOLD_DAYS
+        print(f"  {name:12s}: هیچ افقِ معتبری یافت نشد → افقِ پیش‌فرض "
+              f"({HOLD_DAYS} روز) استفاده می‌شود")
+        continue
+
+    best_auc  = max(results_h.values())
+    near_best = [h for h, a in results_h.items() if a >= best_auc - HORIZON_MIN_MARGIN]
+    chosen_h  = min(near_best)   # ساده‌ترین (کوتاه‌ترین) افق در بینِ هم‌سطح‌ها
+    selected_hold_days[name] = chosen_h
+
+    detail = "  ".join(f"{h}d={a:.3f}" for h, a in sorted(results_h.items()))
+    print(f"  {name:12s}: {detail}  →  انتخاب شد: {chosen_h} روز "
+          f"(AUC={results_h[chosen_h]:.4f}, بهترین={best_auc:.4f})")
+
+horizon_search_df = pd.DataFrame(horizon_search_log)
+horizon_search_df.to_csv(FP + 'horizon_selection_summary.csv', index=False)
+print(f"\n✅ افقِ منتخبِ هر سهم: {selected_hold_days}")
+print("   جزئیاتِ کاملِ تورنمنتِ افق (همهٔ کاندیدها، نه فقط برنده) در "
+      "horizon_selection_summary.csv ذخیره شد — برای شفافیت در برابرِ "
+      "هرگونه شبهه‌ی cherry-picking.")
+
+
+# ============================================================
+#  CELL 5 — تقسیم، target/regime بدون Leakage، مقیاس‌بندی
+#  🆕 v15: افقِ هر سهم دیگر یک عددِ سراسریِ ثابت نیست — از تورنمنتِ
+#  CELL 4.8 (`selected_hold_days[name]`) می‌آید و در همان سهم تا انتهای
+#  pipeline (Purge Gap، Stacking OOF، Walk-Forward، بک‌تست/BS/آنالیزِ
+#  ریسک، بهینه‌سازیِ پرتفوی) به‌طور یکدست استفاده می‌شود.
+# ============================================================
 prepared = {}
 print("\n⏳ Preparing splits...")
 
@@ -994,7 +1138,8 @@ for name, df_raw in filtered.items():
     mrf = mrt.reindex(df_raw.index).ffill().fillna(0)
     mvf = mvt.reindex(df_raw.index).ffill().fillna(0)
 
-    df_feat = add_features(df_raw, mrf, mvf)
+    H = selected_hold_days.get(name, HOLD_DAYS)
+    df_feat = add_features(df_raw, mrf, mvf, hold_days=H)
 
     for col in FEATURES:
         if col in df_feat.columns:
@@ -1007,7 +1152,7 @@ for name, df_raw in filtered.items():
     if n == 0:
         raise ValueError(f"{name}: df_feat is empty after dropna")
 
-    tr_sl, vl_sl, te_sl = time_split_slices(n)
+    tr_sl, vl_sl, te_sl = time_split_slices(n, purge=H)
     train_stats_df = df_feat.iloc[tr_sl]   # فقط برای آمار بدون نشت (median/quantile)
 
     median_ret_train = train_stats_df['ret_5d'].median()
@@ -1029,11 +1174,12 @@ for name, df_raw in filtered.items():
     Xvl = sc.transform(vl[FEATURES])
     Xte = sc.transform(te[FEATURES])
 
-    print(f"  {name}: train={len(tr)} val={len(vl)} test={len(te)} "
+    print(f"  {name}: افق={H}روز  train={len(tr)} val={len(vl)} test={len(te)} "
           f"UP%(train)={tr['target'].mean()*100:.0f}%  "
           f"Features={len(FEATURES)}")
 
     prepared[name] = {
+        'hold_days': H,
         'X_train': Xtr, 'y_train': tr['target'].values,
         'X_val':   Xvl, 'y_val':   vl['target'].values,
         'X_test':  Xte, 'y_test':  te['target'].values,
@@ -1095,7 +1241,7 @@ for name, d in prepared.items():
     df_feat = add_leaky_demo_feature(d['_df_feat_full']).dropna(subset=['leak_feat'])
     feats_leaky = FEATURES + ['leak_feat']
     n = len(df_feat)
-    tr_sl, _, te_sl = time_split_slices(n)   # 🆕 v7: همان Purged split صادقانه
+    tr_sl, _, te_sl = time_split_slices(n, purge=d['hold_days'])   # 🆕 v7/v15: همان Purge Gapِ افقِ خودِ این سهم
     tr, te = df_feat.iloc[tr_sl], df_feat.iloc[te_sl]
     sc = RobustScaler().fit(tr[feats_leaky])          # اسکیلر این‌جا صحیح فیت شده
     Xtr_lf, Xte_lf = sc.transform(tr[feats_leaky]), sc.transform(te[feats_leaky])
@@ -1848,14 +1994,16 @@ def find_threshold_pr(y_true, proba):
     return (thr_f1 + thr_youden) / 2
 
 
-def get_oof_meta_features(mdls, model_names, X_trval, y_trval, n_splits=5):
+def get_oof_meta_features(mdls, model_names, X_trval, y_trval, n_splits=5, purge=PURGE_GAP):
+    """🆕 v15: purge پیش‌فرض همان PURGE_GAP سراسری است (برای FRAUD/سازگاری)؛
+    مسیر HONEST صریحاً purge=افقِ خودِ همان سهم را پاس می‌دهد."""
     n = len(X_trval)
     tscv = TimeSeriesSplit(n_splits=n_splits)
     oof = np.full((n, len(model_names)), np.nan)
 
     for tr_idx, te_idx in tscv.split(X_trval):
-        if len(tr_idx) > PURGE_GAP:
-            tr_idx_purged = tr_idx[:-PURGE_GAP]
+        if len(tr_idx) > purge:
+            tr_idx_purged = tr_idx[:-purge]
         else:
             continue
         Xtr_f = X_trval[tr_idx_purged]
@@ -1909,7 +2057,8 @@ for name, data in prepared.items():
 
     stack_names_available = [m for m in STACK_MODELS if m in mdls]
     oof, valid_mask = get_oof_meta_features(
-        mdls, stack_names_available, X_trval, y_trval, n_splits=5)
+        mdls, stack_names_available, X_trval, y_trval, n_splits=5,
+        purge=data['hold_days'])   # 🆕 v15: افقِ خودِ این سهم
 
     meta_X_vl_full = np.column_stack(
         [get_proba(mdls[mn], mn, Xvl) for mn in stack_names_available])
@@ -2093,13 +2242,14 @@ for name, data in prepared.items():
               f"از این چکِ سبک صرف‌نظر شد")
         continue
 
+    H_stock = data['hold_days']   # 🆕 v15: افقِ خودِ این سهم
     df_full = data['_df_feat_full']
     tscv = TimeSeriesSplit(n_splits=WF_N_SPLITS)
     fold_aucs = []
     for tr_idx, te_idx in tscv.split(df_full):
-        if len(tr_idx) <= HOLD_DAYS:
+        if len(tr_idx) <= H_stock:
             continue
-        tr_fold = df_full.iloc[tr_idx[:-HOLD_DAYS]]   # همان Purge Gap استاندارد
+        tr_fold = df_full.iloc[tr_idx[:-H_stock]]   # همان Purge Gap استانداردِ همین افق
         te_fold = df_full.iloc[te_idx]
         if tr_fold['target'].nunique() < 2 or te_fold['target'].nunique() < 2:
             continue
@@ -2438,11 +2588,13 @@ print("  فیچرهای منتخب:", ", ".join(FEATURES_PRUNED))
 
 pruned_prepared = {}
 for name, data in prepared.items():
+    H = data['hold_days']   # 🆕 v15: همان افقِ منتخبِ این سهم (برای مقایسهٔ apples-to-apples با نسخهٔ کامل)
     df_full = data['_df_feat_full']
-    tr_sl, vl_sl, te_sl = time_split_slices(len(df_full))
+    tr_sl, vl_sl, te_sl = time_split_slices(len(df_full), purge=H)
     tr = df_full.iloc[tr_sl]; vl = df_full.iloc[vl_sl]; te = df_full.iloc[te_sl]
     sc = RobustScaler()
     pruned_prepared[name] = {
+        'hold_days': H,
         'X_train': sc.fit_transform(tr[FEATURES_PRUNED]), 'y_train': tr['target'].values,
         'X_val':   sc.transform(vl[FEATURES_PRUNED]),      'y_val':   vl['target'].values,
         'X_test':  sc.transform(te[FEATURES_PRUNED]),      'y_test':  te['target'].values,
@@ -2497,13 +2649,14 @@ for name, data in pruned_prepared.items():
     if champion_model is None or champion_name in ('stacking', 'voting'):
         print(f"    {name:12s}: مدلِ برتر ({champion_name}) مرکب است — رد شد")
         continue
+    H_stock = data['hold_days']   # 🆕 v15
     df_full = data['_df_feat_full']
     tscv = TimeSeriesSplit(n_splits=WF_N_SPLITS)
     fold_aucs = []
     for tr_idx, te_idx in tscv.split(df_full):
-        if len(tr_idx) <= HOLD_DAYS:
+        if len(tr_idx) <= H_stock:
             continue
-        tr_fold = df_full.iloc[tr_idx[:-HOLD_DAYS]]
+        tr_fold = df_full.iloc[tr_idx[:-H_stock]]
         te_fold = df_full.iloc[te_idx]
         if tr_fold['target'].nunique() < 2 or te_fold['target'].nunique() < 2:
             continue
@@ -2635,11 +2788,12 @@ for name, data in prepared.items():
     ret_test = data['ret_test']
     # 🆕 v7: نوسانِ واقعیِ روزانهٔ هر روزِ تست (رفعِ باگ dead-lookup قبلی)
     vol_test = data['volatility_test']
+    H = data['hold_days']   # 🆕 v15: افقِ خودِ این سهم
 
     var_h, cvar_h = historical_var_cvar(ret_test, alpha=0.05)
     var_p = parametric_var(ret_test, alpha=0.05)
     bs_prem_mean = float(np.mean(
-        bs_fair_premium_pct(np.std(ret_test) / np.sqrt(OPTION_HOLD_DAYS))))
+        bs_fair_premium_pct(np.std(ret_test) / np.sqrt(H), T_days=H)))
 
     risk_metrics[name] = {
         'VaR_hist_95 (%)':  round(var_h  * 100, 2),
@@ -2680,7 +2834,10 @@ print("\n✅ VaR/CVaR و قیمت تعادلی بلک-شولز محاسبه شد
 # ============================================================
 def run_backtest_advanced(ret_true, proba, conf_high, conf_low,
                            premium=PREMIUM_PCT, strike=STRIKE_PCT,
-                           tc=TRANS_COST, daily_vol=None, bull_trend=None):
+                           tc=TRANS_COST, daily_vol=None, bull_trend=None,
+                           option_hold_days=OPTION_HOLD_DAYS):
+    """🆕 v15: option_hold_days به bs_fair_premium_pct پاس داده می‌شود تا فرضِ
+    طولِ‌عمرِ آپشن در قیمت‌گذاریِ بلک-شولز با افقِ واقعیِ همان سهم هماهنگ باشد."""
     cap_cc  = 1.0; cap_bnh = 1.0
     records = []; prev = 'STOCK_ONLY'
 
@@ -2690,7 +2847,7 @@ def run_backtest_advanced(ret_true, proba, conf_high, conf_low,
     else:
         dv = np.asarray(daily_vol, dtype=float)
         dv = np.where(np.isnan(dv), np.nanmedian(dv[~np.isnan(dv)]) if np.any(~np.isnan(dv)) else 0.02, dv)
-        bs_fair = bs_fair_premium_pct(dv, strike_pct=strike)
+        bs_fair = bs_fair_premium_pct(dv, strike_pct=strike, T_days=option_hold_days)
 
     bull_trend = (np.zeros(n, dtype=int) if bull_trend is None
                   else np.asarray(bull_trend).astype(int))
@@ -2739,8 +2896,9 @@ def run_backtest_advanced(ret_true, proba, conf_high, conf_low,
     return pd.DataFrame(records)
 
 
-def calc_metrics(df):
-    ann = np.sqrt(252 / 5)
+def calc_metrics(df, hold_days=HOLD_DAYS):
+    """🆕 v15: hold_days برای تبدیلِ صحیحِ بازدهِ H-روزه به شارپ/سورتینوی سالانه لازم است."""
+    ann = np.sqrt(252 / hold_days)
     r   = df['cc_return']; rb = df['ret_actual']
     eq  = df['equity_cc']; eqb = df['equity_bnh']
 
@@ -2796,9 +2954,10 @@ for name, data in prepared.items():
 
     bt  = run_backtest_advanced(data['ret_test'], res['proba'],
                                  conf_high, conf_low, daily_vol=vol_test,
-                                 bull_trend=bull_trend_test)
+                                 bull_trend=bull_trend_test,
+                                 option_hold_days=data['hold_days'])   # 🆕 v15
     bt.index = dt
-    m   = calc_metrics(bt)
+    m   = calc_metrics(bt, hold_days=data['hold_days'])   # 🆕 v15
     act = bt['action'].value_counts().to_dict()
     rm  = risk_metrics[name]
     cc_sold_ratio = bt['bs_sold'].mean() * 100 if 'bs_sold' in bt.columns else np.nan
@@ -2879,9 +3038,14 @@ ret_matrix = ret_matrix.fillna(0.0)
 asset_order = list(ret_matrix.columns)
 n_assets = len(asset_order)
 
-ANN = TRADING_DAYS / OPTION_HOLD_DAYS
-mu_vec  = ret_matrix.mean().values * ANN
-cov_mat = ret_matrix.cov().values * ANN
+ANN = TRADING_DAYS / OPTION_HOLD_DAYS  # 🆕 v15: مقیاسِ سراسری/پیش‌فرض — همچنان برای پرتفویِ FRAUD (افقِ ثابت) پایین‌تر استفاده می‌شود
+# 🆕 v15: چون افقِ هر سهم می‌تواند فرق کند، بازدهِ H-روزهٔ هر ستون با
+# فاکتورِ سالانه‌سازیِ خودش annualize می‌شود (نه یک ANN سراسری)؛ برای
+# کوواریانس، تقریبِ استانداردِ sqrt(ann_i * ann_j) به‌کار رفته که برای
+# سری‌های بازده با فرکانسِ متفاوت رایج است.
+ann_vec = np.array([TRADING_DAYS / prepared[nm]['hold_days'] for nm in asset_order])
+mu_vec  = ret_matrix.mean().values * ann_vec
+cov_mat = ret_matrix.cov().values * np.sqrt(np.outer(ann_vec, ann_vec))
 cov_mat = cov_mat + np.eye(n_assets) * 1e-6
 
 
@@ -2989,6 +3153,7 @@ for name in prepared:
     _, m = backtest_results[name]
     final_rows.append({
         'Asset':          name,
+        'Horizon (days)': prepared[name]['hold_days'],   # 🆕 v15
         'Top Model':      display_top_model(name),
         'Method':         res['method'],
         'Calibrated':     res['calibrated'],
@@ -3095,7 +3260,7 @@ print("\n⏳ (FRAUD) Preparing splits with leak_feat...")
 for name, d in prepared.items():
     df_feat_fraud = add_leaky_demo_feature(d['_df_feat_full']).dropna(subset=['leak_feat'])
     n  = len(df_feat_fraud)
-    tr_sl, vl_sl, te_sl = time_split_slices(n)
+    tr_sl, vl_sl, te_sl = time_split_slices(n, purge=d['hold_days'])   # 🆕 v15: افقِ خودِ همین سهم
     tr = df_feat_fraud.iloc[tr_sl]
     vl = df_feat_fraud.iloc[vl_sl]
     te = df_feat_fraud.iloc[te_sl]
@@ -3109,6 +3274,7 @@ for name, d in prepared.items():
           f"Features={len(FEATURES_FRAUD)} (شامل leak_feat)")
 
     fraud_prepared[name] = {
+        'hold_days': d['hold_days'],   # 🆕 v15: هم‌راستا با HONEST برای مقایسهٔ منصفانه
         'X_train': Xtr, 'y_train': tr['target'].values,
         'X_val':   Xvl, 'y_val':   vl['target'].values,
         'X_test':  Xte, 'y_test':  te['target'].values,
@@ -3201,7 +3367,8 @@ for name, data in fraud_prepared.items():
 
     stack_names_available = [m for m in STACK_MODELS if m in mdls]
     oof, valid_mask = get_oof_meta_features(
-        mdls, stack_names_available, X_trval, y_trval, n_splits=5)
+        mdls, stack_names_available, X_trval, y_trval, n_splits=5,
+        purge=data['hold_days'])   # 🆕 v15: هم‌راستا با HONEST
 
     meta_X_vl_full = np.column_stack(
         [get_proba(mdls[mn], mn, Xvl) for mn in stack_names_available])
@@ -3478,9 +3645,10 @@ for name, data in fraud_prepared.items():
 
     bt  = run_backtest_advanced(data['ret_test'], res['proba'],
                                  conf_high, conf_low, daily_vol=vol_test,
-                                 bull_trend=bull_trend_test)
+                                 bull_trend=bull_trend_test,
+                                 option_hold_days=data['hold_days'])   # 🆕 v15
     bt.index = dt
-    m   = calc_metrics(bt)
+    m   = calc_metrics(bt, hold_days=data['hold_days'])   # 🆕 v15
     fraud_backtest_results[name] = (bt, m)
 
     print(f"🚨 {name:12s}  CC={m['CC Return (%)']:+.1f}%  "
