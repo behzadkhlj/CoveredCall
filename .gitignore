@@ -13,3 +13,4 @@ data/*.csv.png
 FRAUD_*.csv
 portfolio_optimization.csv
 CLASSROOM_ONLY_*.csv
+_tournament_checkpoints/

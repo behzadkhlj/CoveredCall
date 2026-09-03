@@ -1957,7 +1957,13 @@ print("✅ توابع آموزش مدل‌ها تعریف شدند: LightGBM, XG
 #  Stacking/Voting به‌جای «همیشه lgbm+xgb+rf»، از بهترین ۵ مدلِ منفرد
 #  (طبق Val AUC هر سهم) ساخته می‌شوند — یعنی برای هر سهم ممکن است
 #  ترکیب پایه‌ی متفاوتی انتخاب شود.
+#  🆕 v17.1: Checkpointِ روی دیسک به‌ازای هر سهم — نگاه کنید به توضیحِ
+#  داخلِ حلقه، پایین‌تر.
 # ============================================================
+import pickle
+TOURNAMENT_CKPT_DIR = os.path.join(os.getcwd(), '_tournament_checkpoints') + os.sep
+os.makedirs(TOURNAMENT_CKPT_DIR, exist_ok=True)
+
 all_models      = {}
 tournament_aucs = {}
 
@@ -1968,6 +1974,32 @@ print("=" * 70)
 
 for name, data in prepared.items():
     print(f"\n{'─'*60}  {name}")
+
+    # 🆕 v17.1: Checkpointِ روی دیسک برای هر سهم — چون تیونِ کاملِ ۹ مدل
+    # روی هر سهم می‌تواند ده‌ها دقیقه طول بکشد، اگر اجرا وسطِ راه قطع شود
+    # (مثلاً ری‌استارتِ خودِ محیط)، اجرای بعدی سهم‌های از قبل تمام‌شده را
+    # دوباره train نمی‌کند. کلید اعتبارسنجیِ کش، افقِ منتخبِ همان سهم است —
+    # اگر تغییر کند (که با seed ثابت نباید بکند)، کش نادیده گرفته می‌شود.
+    _expected_model_keys = {'lgbm', 'xgb', 'rf', 'catboost', 'mlp', 'stacking', 'voting'}
+    if _TORCH_OK:
+        _expected_model_keys |= {'lstm', 'cnn_lstm'}
+
+    ckpt_path = TOURNAMENT_CKPT_DIR + f'{name}.pkl'
+    if os.path.exists(ckpt_path):
+        try:
+            with open(ckpt_path, 'rb') as f:
+                _ck = pickle.load(f)
+            if (_ck.get('hold_days') == data['hold_days']
+                    and set(_ck.get('mdls', {}).keys()) == _expected_model_keys):
+                all_models[name]      = _ck['mdls']
+                tournament_aucs[name] = _ck['aucs']
+                print(f"  ⏩ از checkpoint بارگذاری شد (train دوباره نشد): {ckpt_path}")
+                continue
+            print(f"  ⚠️ checkpoint با افق/مجموعهٔ مدلِ فعلی مطابقت ندارد "
+                  f"(مثلاً نسخهٔ کدِ متفاوت) — train دوباره می‌شود")
+        except Exception as e:
+            print(f"  ⚠️ checkpoint خراب/ناسازگار بود ({e}) — train دوباره می‌شود")
+
     Xtr, ytr = data['X_train'], data['y_train']
     Xvl, yvl = data['X_val'],   data['y_val']
     mdls = {}; aucs = {}; t0 = time.time()
@@ -2052,6 +2084,10 @@ for name, data in prepared.items():
     print(f"\n  🏆 بهترین مدل برای {name}: {best_name} "
           f"(Val AUC={aucs[best_name]:.4f})")
     print(f"  ✅ {name}  ({time.time()-t0:.0f}s total)")
+
+    with open(ckpt_path, 'wb') as f:  # 🆕 v17.1
+        pickle.dump({'mdls': mdls, 'aucs': aucs, 'hold_days': data['hold_days']}, f)
+
     gc.collect()
 
 print("\n✅ Tournament complete (۹ مدل، بدون حذف)")
