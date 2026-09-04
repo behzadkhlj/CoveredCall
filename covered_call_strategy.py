@@ -2226,6 +2226,92 @@ STACK_MODELS = ['lgbm', 'xgb', 'rf', 'catboost', 'mlp', 'lstm', 'cnn_lstm', 'sta
 # با فیلترِ «[m for m in STACK_MODELS if m in mdls]» به همان ۵ مدل قبلی
 # محدود می‌شود — نیازی به شاخه‌بندی جدا نیست.
 
+
+# ============================================================
+#  CELL 7.5 — 🆕 v18: آزمونِ آماریِ Diebold-Mariano بینِ مدل‌های تورنمنت
+#  انگیزه: نگواب (Ngwaba, 2025) دقتِ پیش‌بینیِ مدل‌های سری‌زمانی/یادگیریِ
+#  ماشین/یادگیریِ عمیق برایِ ETFهایِ Covered Call را با همین آزمون مقایسه
+#  کرده و نشان داده بود RNN/CNN با سطحِ معناداریِ ۱٪ از بقیه برترند؛ همان
+#  آزمون این‌جا رویِ نُه مدلِ تورنمنتِ خودِ این پژوهش، رویِ مجموعه‌ی آزمونِ
+#  کاملاً خارج‌از‌نمونه (نه Val)، پیاده‌سازی می‌شود.
+#  تابعِ زیان: مجذورِ خطای احتمال نسبت به برچسبِ واقعی (زیانِ Brier).
+#  برایِ خودهمبستگیِ ناشیِ از افقِ H-روزه، برآوردگرِ HAC با h-1 تأخیر و
+#  تصحیحِ نمونهٔ کوچکِ Harvey-Leybourne-Newbold (1997) اعمال می‌شود.
+# ============================================================
+from scipy.stats import t as _t_dist
+
+def diebold_mariano_test(y_true, p1, p2, h=1):
+    """آزمونِ Diebold & Mariano (1995) با تصحیحِ نمونهٔ کوچکِ
+    Harvey, Leybourne & Newbold (1997). زیان = خطایِ مجذورِ احتمالِ
+    پیش‌بینی‌شده نسبت به برچسبِ واقعی (Brier-style loss).
+    dm_stat > 0 یعنی p1 زیانِ بیشتری دارد (p2 برتر است)."""
+    e1 = (np.asarray(p1) - np.asarray(y_true)) ** 2
+    e2 = (np.asarray(p2) - np.asarray(y_true)) ** 2
+    d = e1 - e2
+    Tn = len(d)
+    if Tn < 10:
+        return np.nan, np.nan
+    d_bar = d.mean()
+    h_int = max(int(h), 1)
+    gamma0 = np.var(d, ddof=0)
+    var_d = gamma0
+    for lag in range(1, h_int):
+        if lag >= Tn:
+            break
+        cov = np.cov(d[lag:], d[:-lag])[0, 1]
+        w = 1 - lag / h_int
+        var_d += 2 * w * cov
+    var_d = max(var_d, 1e-12)
+    dm_stat = d_bar / np.sqrt(var_d / Tn)
+    hln = np.sqrt(max((Tn + 1 - 2 * h_int + h_int * (h_int - 1) / Tn) / Tn, 1e-6))
+    dm_adj = dm_stat * hln
+    p_value = 2 * (1 - _t_dist.cdf(abs(dm_adj), df=max(Tn - 1, 1)))
+    return float(dm_adj), float(p_value)
+
+
+print("\n" + "=" * 70)
+print("  DIEBOLD-MARIANO TEST — مقایسهٔ زوجیِ دقتِ پیش‌بینیِ مدل‌های تورنمنت رویِ Test")
+print("  (روش‌شناسی طبقِ Ngwaba, 2025؛ اصلِ آزمون: Diebold & Mariano, 1995)")
+print("=" * 70)
+
+dm_rows = []
+for name, data in prepared.items():
+    mdls = all_models[name]
+    Xte, yte = data['X_test'], data['y_test']
+    h = int(data['hold_days'])
+    model_names_here = [m for m in STACK_MODELS if m in mdls]
+    proba_by_model = {mn: get_proba(mdls[mn], mn, Xte) for mn in model_names_here}
+
+    for i in range(len(model_names_here)):
+        for j in range(i + 1, len(model_names_here)):
+            m1, m2 = model_names_here[i], model_names_here[j]
+            dm_stat, p_val = diebold_mariano_test(yte, proba_by_model[m1], proba_by_model[m2], h=h)
+            if np.isnan(dm_stat):
+                better = 'نامعتبر (نمونهٔ کوچک)'
+            elif p_val < 0.05:
+                better = m2 if dm_stat > 0 else m1
+            else:
+                better = 'تفاوتِ معنادار نیست'
+            dm_rows.append({
+                'Asset': name, 'Model_A': m1, 'Model_B': m2,
+                'DM_stat': dm_stat, 'p_value': p_val,
+                'Significant_5pct': (p_val < 0.05) if not np.isnan(p_val) else None,
+                'Better_Model': better,
+            })
+    n_pairs = len(model_names_here) * (len(model_names_here) - 1) // 2
+    print(f"  ✅ {name}: {len(model_names_here)} مدل، {n_pairs} جفتِ آزموده‌شده")
+
+dm_df = pd.DataFrame(dm_rows)
+dm_df.to_csv(FP + 'diebold_mariano_test.csv', index=False)
+
+n_sig = dm_df['Significant_5pct'].sum()
+n_total = dm_df['Significant_5pct'].notna().sum()
+print(f"\n  خلاصه: از {n_total} جفتِ مقایسه‌شده در کلِ ۶ سهم، "
+      f"{n_sig} جفت ({(n_sig / max(n_total, 1) * 100):.1f}٪) در سطحِ ۵٪ "
+      f"تفاوتِ آماریِ معنادار داشتند.")
+print("  ✅ ذخیره شد: diebold_mariano_test.csv")
+
+
 stacking_models = {}
 all_results     = {}
 best_model_info = {}
