@@ -1,0 +1,7 @@
+Asset,Horizon,Folds,Mean_RMSE_logret,Std_RMSE_logret
+Fameli,10,2,0.1451,0.0343
+Fulad,10,2,0.1401,0.0404
+IranKhodro,10,2,0.1639,0.0405
+Khgostar,10,2,0.1812,0.0143
+Shapna,10,2,0.1719,0.0141
+VebMellat,20,2,0.2226,0.0109
