@@ -54,8 +54,11 @@ Strike، تعداد/نوع مدل‌ها) را تغییر نداده — فقط 
   شرطیِ GARCH(1,1)-t.
 - انتخابِ افقِ سررسید با تورنمنتِ Purged Walk-Forward (نه یک عددِ دلبخواهی).
 - ۹ مدل/baseline: Naive/Drift/GBM-GARCH، Ridge، LightGBM (+ رگرسیونِ کوانتایل)،
-  XGBoost، CatBoost، RandomForest، LSTM+Attention (PyTorch)، و یک Ensemble با
-  وزن‌دهیِ اعتبارسنجی‌شده.
+  XGBoost، CatBoost، RandomForest، یک خانواده‌ی CNN-LSTM/GRU+Attention (PyTorch)،
+  و یک Ensemble با وزن‌دهیِ اعتبارسنجی‌شده.
+- تیونینگِ هایپرپارامترِ مخصوصِ هر مدل: GridSearchCV (با CV سفارشیِ Purged) برایِ
+  Ridge/RandomForest، Optuna/TPE برایِ LightGBM/XGBoost/CatBoost، و Grid Search
+  دستیِ معماری برایِ CNN-LSTM/GRU — همه روی Validation، با تعدادِ ترکیبِ محدود.
 - Purged Split با Embargo Gap، وزن‌دهیِ زمانیِ نمایی، آزمونِ آماریِ Wilcoxon، و
   چکِ پایداریِ Walk-Forward — بدونِ نگاه‌به‌آینده در هیچ مرحله‌ای.
 

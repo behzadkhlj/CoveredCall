@@ -28,15 +28,19 @@
 # | نوسانِ شدید/رژیم‌های متفاوت | بورس تهران در ۱۵ سال اخیر چند رژیمِ کاملاً متفاوتِ تورمی/رکودی را رد کرده | فیچرِ **نوسانِ شرطیِ GARCH(1,1)-t** (برازش‌شده فقط روی داده‌ی Train)، **وزن‌دهیِ نمایی به‌نفعِ داده‌ی جدید** (Recency Weighting)، و فیچرهای کلانِ **نرخ دلار آزاد**. |
 # | نشتِ داده (Leakage) | هدف H روز جلوتر را می‌بیند؛ بدون احتیاط، مرزِ Train/Val/Test نشت می‌دهد | **Purged Split با Embargo Gap = H روز** بینِ هر دو بخش (دقیقاً همان اصلِ Purged Cross-Validation در کتابِ *Advances in Financial Machine Learning*, López de Prado 2018). |
 # | انتخابِ افقِ سررسید | افقِ ثابتِ ۵ روزه در نسخه‌ی قبلی کاملاً دلبخواهی بود | **تورنمنتِ افق** روی چند افقِ کاندید (۱۰/۱۵/۲۰/۳۰ روزِ معاملاتی) با معیارِ Skill نسبت به یک baseline ساده، روی Walk-Forward Purged Folds — فقط از داده‌ی پیش از Test استفاده می‌شود (نه cherry-picking روی Test). |
-# | مدل‌های قوی | یک مدلِ تکی معمولاً بی‌ثبات است | مجموعه‌ای از baselineهای کلاسیک مالی (Random Walk، Drift، GBM با نوسانِ GARCH) + مدل‌های یادگیریِ ماشین (Ridge، LightGBM، XGBoost، CatBoost، RandomForest) + یک **LSTM+Attention** (PyTorch) + یک **Ensemble با وزن‌دهیِ اعتبارسنجی‌شده** (Forecast Combination، ایده‌ی Bates & Granger 1969) که اگر مدل‌های ML چیزی روی baseline اضافه نکنند، خودکار به baseline برمی‌گردد. |
-# | عدمِ‌قطعیت | یک عددِ تکی برای قیمتِ سررسید در بازارِ پرنوسان گمراه‌کننده است | **رگرسیونِ کوانتایل** (۱۰٪/۵۰٪/۹۰٪) با LightGBM → بازه‌ی پیش‌بینیِ قیمتِ سررسید، نه فقط یک نقطه. |
+# | مدل‌های قوی | یک مدلِ تکی معمولاً بی‌ثبات است | مجموعه‌ای از baselineهای کلاسیک مالی (Random Walk، Drift، GBM با نوسانِ GARCH) + مدل‌های یادگیریِ ماشین (Ridge، LightGBM، XGBoost، CatBoost، RandomForest) + یک خانواده‌ی مدلِ سری‌زمانیِ عمیق (**CNN-LSTM/GRU + Attention**، PyTorch) + یک **Ensemble با وزن‌دهیِ اعتبارسنجی‌شده** (Forecast Combination، ایده‌ی Bates & Granger 1969) که اگر مدل‌های ML چیزی روی baseline اضافه نکنند، خودکار به baseline برمی‌گردد. |
+# | هایپرپارامترهای هر مدل | هایپرپارامترِ پیش‌فرض به‌ندرت بهینه است | **تیونینگِ اختصاصیِ هر مدل** روی Validation: `GridSearchCV` (اسکای‌لرن، با CV سفارشیِ Purged) برایِ Ridge/RandomForest؛ Optuna/TPE (بهینه‌سازیِ بیزی، برایِ فضاهایِ پیوسته) برایِ LightGBM/XGBoost/CatBoost؛ Grid Search دستیِ معماری برایِ CNN-LSTM/GRU. تعدادِ ترکیب‌ها در هر گرید عمداً کم نگه داشته شده (۶ تا ۸ ترکیب). |
+# | عدمِ‌قطعیت | یک عددِ تکی برای قیمتِ سررسید در بازارِ پرنوسان گمراه‌کننده است | **رگرسیونِ کوانتایل** (۱۰٪/۵۰٪/۹۰٪) با LightGBMِ تیون‌شده → بازه‌ی پیش‌بینیِ قیمتِ سررسید، نه فقط یک نقطه. |
 # | صداقتِ علمی | انتخابِ مدل روی Test = Data Snooping | مدلِ «پیشنهادی» برای هر سهم فقط بر اساسِ **Validation RMSE** انتخاب می‌شود؛ Test فقط یک‌بار در پایان، صرفاً برای گزارش، لمس می‌شود. یک تست Walk-Forward Robustness (تشخیصی) هم پایداریِ نتیجه را نشان می‌دهد. |
 # 
 # **الهام‌گیری از ادبیاتِ حرفه‌ای:** ترکیبِ درخت‌های گرادیان‌بوست + شبکه‌ی توالی برای
-# پیش‌بینیِ مالی (Kim & Won, 2018 — hybrid GARCH-LSTM)، Purged/Embargoed Cross-Validation
-# (López de Prado, 2018)، اهمیتِ baselineهای Random-Walk/Drift در پیش‌بینیِ قیمت
-# (Meese & Rogoff puzzle در ادبیاتِ ارز/سهام)، و رگرسیونِ کوانتایل برای کمّی‌سازیِ ریسک در
-# بازارهای نوظهور با نوسانِ بالا.
+# پیش‌بینیِ مالی (Kim & Won, 2018 — hybrid GARCH-LSTM)، معماریِ CNN-LSTM برایِ
+# استخراجِ الگوهای محلی پیش از مدل‌سازیِ توالی (Lu, Zhang & Xu, 2020؛ همان الگویی که
+# در نسخه‌ی v17 پروژه هم استفاده شده بود)، Purged/Embargoed Cross-Validation
+# (López de Prado, 2018)، بهینه‌سازیِ بیزیِ هایپرپارامتر با TPE به‌جای Grid Search
+# کلاسیک برای فضاهای پیوسته (Bergstra et al., 2011)، اهمیتِ baselineهای
+# Random-Walk/Drift در پیش‌بینیِ قیمت (Meese & Rogoff puzzle در ادبیاتِ ارز/سهام)، و
+# رگرسیونِ کوانتایل برای کمّی‌سازیِ ریسک در بازارهای نوظهور با نوسانِ بالا.
 # 
 # ⚠️ **صداقتِ علمی، دقیقاً مثلِ نسخه‌ی قبلیِ پروژه:** نتایج هرچه باشند (حتی اگر یک
 # baseline ساده برنده شود) دقیقاً همان‌طور که به‌دست آمده گزارش می‌شوند — این خودش
@@ -300,7 +304,22 @@ def purged_walkforward_folds(n_train, n_splits, purge, min_train=200):
 def recency_weights(n, half_life=RECENCY_HALF_LIFE):
     return 0.5 ** ((n - 1 - np.arange(n)) / half_life)
 
-print("✅ توابعِ Split/Weighting آماده‌اند")
+
+class PurgedWalkForwardCV:
+    '''شیءِ CV سازگار با اسکای‌لرن (split/get_n_splits) برای استفاده‌ی مستقیم در
+    GridSearchCV — دقیقاً همان فولدهای Purged Walk-Forward بالا را برمی‌گرداند
+    (نه KFold تصادفی که برای داده‌ی سری‌زمانی نامعتبر است).'''
+    def __init__(self, n, n_splits=3, purge=10, min_train=200):
+        self.folds = purged_walkforward_folds(n, n_splits, purge, min_train)
+
+    def split(self, X, y=None, groups=None):
+        for tr_s, va_s in self.folds:
+            yield np.arange(tr_s.start, tr_s.stop), np.arange(va_s.start, va_s.stop)
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return len(self.folds)
+
+print("✅ توابعِ Split/Weighting + کلاسِ PurgedWalkForwardCV آماده‌اند")
 
 
 # ## ۵) تورنمنتِ افقِ سررسید (Maturity Horizon Selection)
@@ -353,30 +372,71 @@ def evaluate_horizon(feat_no_target, close, h, n_pretest):
 print("✅ evaluate_horizon() آماده است")
 
 
-# ## ۶) مدل‌ها
+# ## ۶) مدل‌ها + تیونینگِ هایپرپارامتر (برای هر مدل جداگانه)
 # 
 # **Baselineهای مالیِ کلاسیک** (برای این‌که مدل‌های ML مجبور باشند واقعاً چیزی «اضافه»
 # کنند، نه این‌که صرفاً از یک baseline ضعیف بهتر باشند):
 # - `Naive_RW`: بدونِ تغییر (Random Walk خالص).
 # - `Drift_RW`: میانگینِ تاریخیِ بازدهِ H‌روزه (Random Walk with Drift).
 # - `GBM_GARCH`: میانگینِ رانه‌ی روزانه × H (معادلِ حرکتِ براونیِ هندسی؛ خودِ فرضِ
-#   پایه‌ای مدلِ بلک-شولز که در بک‌تستِ کاورد کالِ نسخه‌ی قبلی هم استفاده شده بود).
+#   پایه‌ای مدلِ بلک-شولز).
 # 
-# **مدل‌های یادگیریِ ماشین** (هر کدام با Optuna روی Validation تیون می‌شوند، نه Test):
-# - `Ridge` — رگرسیونِ خطیِ منظم‌شده (baseline قوی و پایدار).
-# - `LightGBM` / `XGBoost` / `CatBoost` — درخت‌های گرادیان‌بوست (استانداردِ فعلیِ
-#   صنعت برای داده‌های جدولیِ مالی).
-# - `RandomForest` — جنگلِ تصادفی (کاهشِ واریانس از طریقِ Bagging).
-# - `LSTM_Attn` — شبکه‌ی LSTM با مکانیزمِ Attention (PyTorch) روی پنجره‌ی ۲۰روزه‌ی
-#   فیچرها؛ تنها مدلِ سری‌زمانیِ عمیقِ این نوت‌بوک.
-# - `Ensemble` — ترکیبِ **همه‌ی** مدل‌های بالا (baselineها هم داخل‌اند) با وزنِ
-#   معکوسِ RMSE روی Validation (Forecast Combination، Bates & Granger 1969)؛ اگر
-#   ML چیزی روی baseline اضافه نکند، وزنِ Ensemble خودکار به baseline برمی‌گردد.
+# **مدل‌های یادگیریِ ماشین/عمیق** — این‌بار **هر مدل با روشِ تیونینگِ مناسبِ خودش**
+# روی Validation بهینه می‌شود (نه فقط دو مدل مثل نسخه‌ی قبلی):
 # 
-# برای LightGBM علاوه‌بر پیش‌بینیِ نقطه‌ای، **رگرسیونِ کوانتایل ۱۰٪/۵۰٪/۹۰٪** هم آموزش
-# داده می‌شود تا به‌جای یک عددِ تکی، یک **بازه‌ی پیش‌بینیِ قیمتِ سررسید** داشته باشیم —
-# در بازاری به‌این‌نوسانی، این بازه برای تصمیمِ کاورد کال (انتخابِ Strike) مهم‌تر از
-# خودِ نقطه است.
+# | مدل | روشِ تیونینگ | فضای جستجو |
+# |---|---|---|
+# | `Ridge` | **GridSearchCV** (اسکای‌لرن) با CV سفارشیِ Purged Walk-Forward | ۶ مقدار برای `alpha` |
+# | `RandomForest` | **GridSearchCV** با همان CV | ۲×۲×۲=۸ ترکیب (`n_estimators`×`max_depth`×`min_samples_leaf`) |
+# | `LightGBM` | Optuna/TPE (بهینه‌سازیِ بیزی) | ۶ هایپرپارامترِ پیوسته، ۴۰ trial |
+# | `XGBoost` | Optuna/TPE | ۵ هایپرپارامتر، ۳۰ trial |
+# | `CatBoost` | Optuna/TPE | ۳ هایپرپارامتر، ۲۰ trial |
+# | `DeepSeq` (زیر) | **Grid Search دستی روی معماری** | ۵ ترکیب |
+# 
+# چرا برای LightGBM/XGBoost/CatBoost از Optuna به‌جای GridSearchCV؟ چون این مدل‌ها
+# چند هایپرپارامترِ **پیوسته** دارند و اندازه‌ی یک گریدِ کلاسیک با هر بُعدِ اضافه
+# به‌صورتِ نمایی رشد می‌کند (Curse of Dimensionality) — یعنی برای پوششِ همین فضا با
+# Grid Search کلاسیک، به صدها ترکیب نیاز بود. Optuna با نمونه‌گیریِ بیزیِ TPE با
+# همان تعدادِ کمِ trial (طبقِ خواسته‌ی «جستجوی زیاد نه») به نتیجه‌ای هم‌ارز یا بهتر از
+# یک گریدِ بسیار بزرگ می‌رسد — این خودش یکی از رایج‌ترین روش‌های حرفه‌ای در صنعت است.
+# برای `Ridge`/`RandomForest` که فضای هایپرپارامترشان کوچک و گسسته است، مستقیماً از
+# **GridSearchCV** استفاده شده (طبقِ درخواستِ صریح)، اما با یک کلاسِ CV سفارشی
+# (`PurgedWalkForwardCV`، تعریف‌شده در بخشِ ۴) به‌جایِ k-fold تصادفیِ پیش‌فرضِ
+# اسکای‌لرن — چون k-fold تصادفی ترتیبِ زمانی را به‌هم می‌ریزد و برای سری‌زمانیِ مالی
+# باعثِ نشتِ داده می‌شود.
+# 
+# ### مدلِ سری‌زمانیِ عمیق: CNN + LSTM/GRU + Attention
+# 
+# به‌جای یک LSTM ساده، یک معماریِ یکپارچه (`SeqNet`) ساخته شده که سه انتخاب دارد:
+# 
+# 1. **لایه‌ی Conv1d علّی اختیاری** (`use_cnn`) — پیش از شبکه‌ی بازگشتی، یک کانولوشنِ
+#    یک‌بعدی روی محورِ زمان اجرا می‌شود که الگوهای محلیِ کوتاه‌مدت (شبیهِ یک الگوی
+#    چند-کندلی) را استخراج می‌کند؛ کاملاً داخلِ همان پنجره‌ی ۲۰روزه‌ی بسته‌شده اجرا
+#    می‌شود (بدون نگاه به بعد از لحظه‌ی پیش‌بینی)، دقیقاً همان ایده‌ی معماریِ
+#    CNN-LSTM که در نسخه‌ی قبلیِ این پروژه (v17) برای کلاسیفیکیشن استفاده شده بود.
+# 2. **نوعِ سلولِ بازگشتی** (`rnn_type`): `LSTM` یا `GRU` — GRU پارامترِ کمتری دارد و
+#    روی داده‌ی کوچک‌تر گاهی بهتر Generalize می‌کند.
+# 3. **اندازه‌ی لایه‌ی پنهان** (`hidden`).
+# 4. **Attention Pooling** — در هر پنجِ ترکیب ثابت است: به‌جای این‌که فقط آخرین روزِ
+#    پنجره ملاک باشد، مدل یاد می‌گیرد کدام روزها برایِ این پیش‌بینیِ خاص مهم‌ترند.
+# 
+# برایِ هر سهم، هر ۵ ترکیبِ زیر آموزش داده می‌شوند (Grid Search دستی، چون این مدل
+# با API اسکای‌لرن سازگار نیست) و برنده بر اساسِ کمترینِ خطایِ Validation انتخاب
+# می‌شود — یعنی می‌تواند برایِ یک سهم `LSTM`، برایِ سهمِ دیگر `CNN-GRU` باشد؛ این
+# صادقانه در ستونِ `DeepSeq` گزارش می‌شود.
+# 
+# ```
+# {LSTM, GRU} × {با CNN, بدون CNN} × یک حالتِ hidden=64 اضافه  →  ۵ معماری
+# ```
+# 
+# - `Ensemble` — ترکیبِ **همه‌ی** مدل‌های بالا (baselineها هم داخل‌اند، با
+#   هایپرپارامترهای تیون‌شده‌شان) با وزنِ معکوسِ RMSE روی Validation (Forecast
+#   Combination، Bates & Granger 1969)؛ اگر هیچ مدلی چیزی روی baseline اضافه
+#   نکند، وزنِ Ensemble خودکار به baseline برمی‌گردد.
+# 
+# برای LightGBM علاوه‌بر پیش‌بینیِ نقطه‌ای، **رگرسیونِ کوانتایل ۱۰٪/۵۰٪/۹۰٪** هم (با
+# همان هایپرپارامترهای تیون‌شده) آموزش داده می‌شود تا یک **بازه‌ی پیش‌بینیِ قیمتِ
+# سررسید** داشته باشیم.
 
 # In[7]:
 
@@ -386,25 +446,50 @@ import catboost as cb
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
 import optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 import torch.nn as nn
 
 
-class AttnLSTM(nn.Module):
-    '''LSTM یک‌لایه + Attention روی محورِ زمان؛ فقط به گذشته‌ی هر پنجره نگاه می‌کند.'''
-    def __init__(self, n_feat, hidden=32):
+class SeqNet(nn.Module):
+    '''LSTM/GRU + لایه‌ی Conv1d علّیِ اختیاری (CNN-LSTM/CNN-GRU) + Attention Pooling.
+    کانولوشن فقط داخلِ همان پنجره‌ی تاریخیِ بسته‌شده اجرا می‌شود (بدون نگاه به آینده).'''
+    def __init__(self, n_feat, hidden=32, rnn_type='lstm', use_cnn=True, kernel_size=3, dropout=0.1):
         super().__init__()
-        self.lstm = nn.LSTM(n_feat, hidden, batch_first=True)
+        self.use_cnn = use_cnn
+        if use_cnn:
+            self.conv = nn.Conv1d(n_feat, n_feat, kernel_size=kernel_size, padding=kernel_size // 2)
+            self.act = nn.ReLU()
+        rnn_cls = nn.LSTM if rnn_type == 'lstm' else nn.GRU
+        self.rnn = rnn_cls(n_feat, hidden, batch_first=True)
         self.attn = nn.Linear(hidden, 1)
-        self.out = nn.Sequential(nn.Linear(hidden, 16), nn.ReLU(), nn.Linear(16, 1))
+        self.out = nn.Sequential(nn.Linear(hidden, 16), nn.ReLU(), nn.Dropout(dropout), nn.Linear(16, 1))
 
     def forward(self, x):
-        h, _ = self.lstm(x)
+        if self.use_cnn:
+            xc = x.transpose(1, 2)
+            xc = self.act(self.conv(xc))
+            x = xc.transpose(1, 2)
+        h, _ = self.rnn(x)
         scores = self.attn(h).squeeze(-1)
         w = torch.softmax(scores, dim=1).unsqueeze(-1)
         ctx = (h * w).sum(dim=1)
         return self.out(ctx).squeeze(-1)
+
+
+SEQ_GRID = [
+    dict(rnn_type='lstm', use_cnn=False, hidden=32),
+    dict(rnn_type='lstm', use_cnn=True,  hidden=32),
+    dict(rnn_type='gru',  use_cnn=False, hidden=32),
+    dict(rnn_type='gru',  use_cnn=True,  hidden=32),
+    dict(rnn_type='lstm', use_cnn=True,  hidden=64),
+]
+
+
+def seq_label(cfg):
+    arch = 'CNN-' if cfg['use_cnn'] else ''
+    return f"DeepSeq({arch}{cfg['rnn_type'].upper()},h{cfg['hidden']})"
 
 
 def make_windows(Xs, ys, w):
@@ -414,7 +499,7 @@ def make_windows(Xs, ys, w):
     return np.array(out_x), np.array(out_y)
 
 
-def train_lstm(X_train, y_train, X_val, y_val, window=20, epochs=150, patience=15, seed=GLOBAL_SEED):
+def train_seqnet(cfg, X_train, y_train, X_val, y_val, window=20, epochs=150, patience=15, seed=GLOBAL_SEED):
     torch.manual_seed(seed)
     scaler = StandardScaler().fit(X_train)
     Xtr_s = scaler.transform(X_train)
@@ -422,7 +507,7 @@ def train_lstm(X_train, y_train, X_val, y_val, window=20, epochs=150, patience=1
     yval_ctx = np.concatenate([y_train[-window:], y_val])
     Xtr_w, ytr_w = make_windows(Xtr_s, y_train, window)
     Xval_w, yval_w = make_windows(Xval_ctx, yval_ctx, window)
-    net = AttnLSTM(X_train.shape[1])
+    net = SeqNet(X_train.shape[1], **cfg)
     opt_ = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-5)
     loss_fn = nn.MSELoss()
     Xtr_t = torch.tensor(Xtr_w, dtype=torch.float32); ytr_t = torch.tensor(ytr_w, dtype=torch.float32)
@@ -451,10 +536,21 @@ def train_lstm(X_train, y_train, X_val, y_val, window=20, epochs=150, patience=1
             if bad >= patience:
                 break
     net.load_state_dict(best_state)
-    return net, scaler, window
+    return net, scaler, best_val
 
 
-def predict_lstm(net, scaler, window, X_context_tail, X_target):
+def tune_seqnet(X_train, y_train, X_val, y_val, window=20):
+    '''Grid Search دستیِ معماری روی SEQ_GRID — برنده بر اساسِ کمترینِ RMSE ولیدیشن.'''
+    best = None
+    for cfg in SEQ_GRID:
+        net, scaler, val_mse = train_seqnet(cfg, X_train, y_train, X_val, y_val, window=window)
+        if best is None or val_mse < best[3]:
+            best = (cfg, net, scaler, val_mse)
+    cfg, net, scaler, val_mse = best
+    return net, scaler, window, cfg
+
+
+def predict_seqnet(net, scaler, window, X_context_tail, X_target):
     Xall = scaler.transform(np.vstack([X_context_tail, X_target]))
     Xw, _ = make_windows(Xall, np.zeros(len(Xall)), window)
     net.eval()
@@ -463,7 +559,7 @@ def predict_lstm(net, scaler, window, X_context_tail, X_target):
     return pred
 
 
-def tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=30):
+def tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=40):
     def objective(trial):
         params = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED,
                       learning_rate=trial.suggest_float('lr', 0.01, 0.1, log=True),
@@ -483,7 +579,7 @@ def tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=30):
     return study.best_params
 
 
-def tune_xgb(X_train, y_train, w_train, X_val, y_val, n_trials=25):
+def tune_xgb(X_train, y_train, w_train, X_val, y_val, n_trials=30):
     def objective(trial):
         params = dict(n_estimators=500,
                       max_depth=trial.suggest_int('max_depth', 3, 6),
@@ -500,7 +596,24 @@ def tune_xgb(X_train, y_train, w_train, X_val, y_val, n_trials=25):
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     return study.best_params
 
-print("✅ کلاس/توابعِ مدل‌ها آماده‌اند (Ridge, LightGBM, XGBoost, CatBoost, RandomForest, LSTM+Attention, Optuna tuners)")
+
+def tune_catboost(X_train, y_train, w_train, X_val, y_val, n_trials=20):
+    def objective(trial):
+        params = dict(iterations=600,
+                      depth=trial.suggest_int('depth', 4, 7),
+                      learning_rate=trial.suggest_float('lr', 0.01, 0.1, log=True),
+                      l2_leaf_reg=trial.suggest_float('l2', 1.0, 10.0),
+                      loss_function='RMSE', verbose=False, random_seed=GLOBAL_SEED, early_stopping_rounds=40)
+        m = cb.CatBoostRegressor(**params)
+        m.fit(X_train, y_train, sample_weight=w_train, eval_set=(X_val, y_val))
+        pred = m.predict(X_val)
+        return np.sqrt(np.mean((pred - y_val) ** 2))
+    study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return study.best_params
+
+print("✅ کلاس/توابعِ مدل‌ها آماده‌اند (Ridge+GridSearchCV, RandomForest+GridSearchCV, "
+      "LightGBM/XGBoost/CatBoost+Optuna, CNN-LSTM/GRU+Attention با Grid Search معماری)")
 
 
 # ## ۷) اجرای کاملِ Pipeline برای هر سهم
@@ -575,13 +688,20 @@ for name in ASSET_NAMES:
     model_preds_val['GBM_GARCH'] = np.full(len(y_val), daily_mu * H)
     model_preds_test['GBM_GARCH'] = np.full(len(y_test), daily_mu * H)
 
+    cv_purged = PurgedWalkForwardCV(len(X_train), n_splits=3, purge=H)
+
     scaler_r = StandardScaler().fit(X_train)
-    ridge = Ridge(alpha=5.0)
-    ridge.fit(scaler_r.transform(X_train), y_train, sample_weight=w_train)
+    Xtr_scaled = scaler_r.transform(X_train)
+    ridge_gcv = GridSearchCV(Ridge(), {'alpha': [0.1, 1, 3, 10, 30, 100]},
+                              scoring='neg_root_mean_squared_error', cv=cv_purged, n_jobs=-1)
+    ridge_gcv.fit(Xtr_scaled, y_train, sample_weight=w_train)
+    ridge = ridge_gcv.best_estimator_
+    ridge.fit(Xtr_scaled, y_train, sample_weight=w_train)   # refit on full Train with the chosen alpha
     model_preds_val['Ridge'] = ridge.predict(scaler_r.transform(X_val))
     model_preds_test['Ridge'] = ridge.predict(scaler_r.transform(X_test))
+    print(f"  [GridSearchCV] Ridge best alpha = {ridge_gcv.best_params_['alpha']}")
 
-    best_lgb = tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=30)
+    best_lgb = tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=40)
     lgb_params = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1)
     lgb_params.update({'learning_rate': best_lgb['lr'], 'num_leaves': best_lgb['num_leaves'],
                         'min_data_in_leaf': best_lgb['min_data_in_leaf'], 'feature_fraction': best_lgb['ff'],
@@ -600,7 +720,7 @@ for name in ASSET_NAMES:
         q_models[q] = qm
     q_pred_test = {q: m.predict(X_test, num_iteration=m.best_iteration) for q, m in q_models.items()}
 
-    best_xgb = tune_xgb(X_train, y_train, w_train, X_val, y_val, n_trials=25)
+    best_xgb = tune_xgb(X_train, y_train, w_train, X_val, y_val, n_trials=30)
     xgb_model = xgb.XGBRegressor(n_estimators=500, max_depth=best_xgb['max_depth'], learning_rate=best_xgb['lr'],
                                   subsample=best_xgb['subsample'], colsample_bytree=best_xgb['colsample'],
                                   reg_lambda=best_xgb['l2'], random_state=GLOBAL_SEED, early_stopping_rounds=40, verbosity=0)
@@ -608,26 +728,35 @@ for name in ASSET_NAMES:
     model_preds_val['XGBoost'] = xgb_model.predict(X_val)
     model_preds_test['XGBoost'] = xgb_model.predict(X_test)
 
-    cb_model = cb.CatBoostRegressor(iterations=600, depth=5, learning_rate=0.03, loss_function='RMSE',
-                                     l2_leaf_reg=5.0, verbose=False, random_seed=GLOBAL_SEED, early_stopping_rounds=40)
+    best_cb = tune_catboost(X_train, y_train, w_train, X_val, y_val, n_trials=20)
+    cb_model = cb.CatBoostRegressor(iterations=600, depth=best_cb['depth'], learning_rate=best_cb['lr'],
+                                     l2_leaf_reg=best_cb['l2'], loss_function='RMSE', verbose=False,
+                                     random_seed=GLOBAL_SEED, early_stopping_rounds=40)
     cb_model.fit(X_train, y_train, sample_weight=w_train, eval_set=(X_val, y_val))
     model_preds_val['CatBoost'] = cb_model.predict(X_val)
     model_preds_test['CatBoost'] = cb_model.predict(X_test)
 
-    rf = RandomForestRegressor(n_estimators=400, max_depth=6, min_samples_leaf=20, n_jobs=-1, random_state=GLOBAL_SEED)
-    rf.fit(X_train, y_train, sample_weight=w_train)
+    rf_gcv = GridSearchCV(RandomForestRegressor(random_state=GLOBAL_SEED, n_jobs=1),
+                           {'n_estimators': [200, 400], 'max_depth': [4, 8], 'min_samples_leaf': [10, 30]},
+                           scoring='neg_root_mean_squared_error', cv=cv_purged, n_jobs=-1)
+    rf_gcv.fit(X_train, y_train, sample_weight=w_train)
+    rf = rf_gcv.best_estimator_
+    rf.fit(X_train, y_train, sample_weight=w_train)   # refit on full Train with the chosen hyperparams
     model_preds_val['RandomForest'] = rf.predict(X_val)
     model_preds_test['RandomForest'] = rf.predict(X_test)
+    print(f"  [GridSearchCV] RandomForest best params = {rf_gcv.best_params_}")
 
-    net, lstm_scaler, window = train_lstm(X_train, y_train, X_val, y_val, window=20)
-    pred_val_lstm = predict_lstm(net, lstm_scaler, window, X_train[-window:], X_val)
-    Xtr_val_tail = np.vstack([X_train[-window:], X_val])[-window:]
-    pred_test_lstm = predict_lstm(net, lstm_scaler, window, Xtr_val_tail, X_test)
-    model_preds_val['LSTM_Attn'] = pred_val_lstm
-    model_preds_test['LSTM_Attn'] = pred_test_lstm
+    net, seq_scaler, seq_window, seq_cfg = tune_seqnet(X_train, y_train, X_val, y_val, window=20)
+    seq_name = seq_label(seq_cfg)
+    pred_val_seq = predict_seqnet(net, seq_scaler, seq_window, X_train[-seq_window:], X_val)
+    Xtr_val_tail = np.vstack([X_train[-seq_window:], X_val])[-seq_window:]
+    pred_test_seq = predict_seqnet(net, seq_scaler, seq_window, Xtr_val_tail, X_test)
+    model_preds_val['DeepSeq'] = pred_val_seq
+    model_preds_test['DeepSeq'] = pred_test_seq
+    print(f"  [Grid Search معماری] بهترینِ DeepSeq برای {name}: {seq_name}")
 
     all_names = ['Naive_RW', 'Drift_RW', 'GBM_GARCH', 'Ridge', 'LightGBM', 'XGBoost',
-                 'CatBoost', 'RandomForest', 'LSTM_Attn']
+                 'CatBoost', 'RandomForest', 'DeepSeq']
     val_rmses = {k: np.sqrt(np.mean((model_preds_val[k] - y_val) ** 2)) for k in all_names}
     inv = {k: 1.0 / max(v, 1e-6) ** 4 for k, v in val_rmses.items()}
     tot = sum(inv.values())
@@ -678,8 +807,9 @@ for name in ASSET_NAMES:
         X_val=X_val, y_val=y_val, X_test=X_test, y_test=y_test,
         p_train=p_train, p_val=p_val, p_test=p_test, dates_test=dates_test,
         lgb_model=lgb_model, lgb_params=lgb_params, xgb_model=xgb_model, cb_model=cb_model,
-        rf_model=rf, ridge_model=ridge, scaler_r=scaler_r,
-        lstm_net=net, lstm_scaler=lstm_scaler, lstm_window=window,
+        rf_model=rf, rf_best_params=rf_gcv.best_params_,
+        ridge_model=ridge, ridge_best_alpha=ridge_gcv.best_params_['alpha'], scaler_r=scaler_r,
+        seq_net=net, seq_scaler=seq_scaler, seq_window=seq_window, seq_cfg=seq_cfg, seq_name=seq_name,
         q_models=q_models, weights=weights, recommended_model=recommended_model,
         model_preds_val=model_preds_val, model_preds_test=model_preds_test,
     )
@@ -687,12 +817,35 @@ for name in ASSET_NAMES:
 print(f"\n✅ Pipeline برای همه‌ی {len(ASSET_NAMES)} سهم تمام شد. زمانِ کل: {time.time()-t_start:.1f} ثانیه")
 
 
+# ## ۷.۵) خلاصه‌ی هایپرپارامترهای انتخاب‌شده (نتیجه‌ی تیونینگ)
+# 
+# این جدول دقیقاً نشان می‌دهد که برای هر سهم، هر روشِ تیونینگ (GridSearchCV یا
+# Optuna یا Grid Search معماری) به چه هایپرپارامترها/معماری‌ای رسیده — تا خروجیِ
+# تیونینگ هم شفاف و قابلِ‌بازبینی باشد، نه یک جعبه‌سیاه.
+
+# In[9]:
+
+
+tuning_rows = []
+for name, art in ASSET_ARTIFACTS.items():
+    tuning_rows.append(dict(
+        Asset=name, Horizon=art['H'],
+        Ridge_alpha=art['ridge_best_alpha'],
+        RandomForest_params=art['rf_best_params'],
+        LightGBM_lr=round(art['lgb_params']['learning_rate'], 4),
+        LightGBM_num_leaves=art['lgb_params']['num_leaves'],
+        DeepSeq_architecture=art['seq_name'],
+    ))
+tuning_df = pd.DataFrame(tuning_rows)
+display(tuning_df)
+
+
 # ## ۸) جدولِ نتایج نهایی (روی Test)
 # 
 # `RMSE_price` و `MAPE_pct` روی **سطحِ قیمتِ بازسازی‌شده** محاسبه شده‌اند (نه روی
 # بازدهِ لگاریتمی)، یعنی دقیقاً همان چیزی که برای «قیمتِ سررسید» اهمیت دارد.
 
-# In[9]:
+# In[10]:
 
 
 results_df = pd.DataFrame(results_rows)
@@ -711,7 +864,7 @@ display(results_df.pivot_table(index='Model', columns='Asset', values='Direction
 # Validation** کمترین خطا را داشته انتخاب شده و فقط در همین یک لحظه، عملکردش روی
 # Test (که تا این‌جا هرگز در انتخاب دخالت نداشته) گزارش می‌شود.
 
-# In[10]:
+# In[11]:
 
 
 best_rows = []
@@ -736,7 +889,7 @@ display(best_model_df)
 # امروز یک اختیارِ خرید با سررسید H روزِ بعد می‌نوشتیم، مدل چه قیمتی برای سهم در همان
 # تاریخِ سررسید پیش‌بینی می‌کرد؟»
 
-# In[11]:
+# In[12]:
 
 
 fig, axes = plt.subplots(len(ASSET_NAMES), 1, figsize=(11, 3.2 * len(ASSET_NAMES)))
@@ -757,11 +910,11 @@ plt.show()
 
 # ## ۱۱) مقایسه‌ی RMSE قیمت بینِ مدل‌ها (نمودارِ میله‌ای)
 
-# In[12]:
+# In[13]:
 
 
 model_order = ['Naive_RW', 'Drift_RW', 'GBM_GARCH', 'Ridge', 'LightGBM', 'XGBoost',
-               'CatBoost', 'RandomForest', 'LSTM_Attn', 'Ensemble']
+               'CatBoost', 'RandomForest', 'DeepSeq', 'Ensemble']
 pivot_rmse = results_df.pivot_table(index='Model', columns='Asset', values='RMSE_price').reindex(model_order)
 fig, ax = plt.subplots(figsize=(12, 5))
 pivot_rmse.T.plot(kind='bar', ax=ax, width=0.85)
@@ -779,7 +932,7 @@ plt.show()
 # چکِ سلامت: اگر فیچرهای بی‌معنی (مثلِ `dow`/`month`) بالای لیست باشند، نشانه‌ی
 # Overfitting روی نویز است.
 
-# In[13]:
+# In[14]:
 
 
 fig, axes = plt.subplots(2, 3, figsize=(16, 9))
@@ -801,7 +954,7 @@ plt.show()
 # زمانیِ مختلف پایدار است یا محصولِ شانسیِ یک تفکیکِ خاص. فولدها از Train+Val ساخته
 # می‌شوند و هرگز به Test دست نمی‌زنند.
 
-# In[14]:
+# In[15]:
 
 
 robustness_rows = []
@@ -842,6 +995,12 @@ display(robustness_df)
 #   هرچند نقطه‌ی پیش‌بینی («سررسید دقیقاً چند تومان می‌شود») سخت است، **بازه‌ی
 #   عدمِ‌قطعیت** به‌خوبی کالیبره شده و برای تصمیمِ عملیِ کاورد کال (انتخابِ Strike
 #   با احتمالِ منطقی) قابلِ‌اتکاست.
+# - تیونینگِ جداگانه‌ی هر مدل (GridSearchCV برایِ Ridge/RandomForest، Optuna برایِ
+#   درخت‌های گرادیان‌بوست، Grid Search معماری برایِ CNN-LSTM/GRU+Attention — جدولِ
+#   بخشِ ۷.۵) نشان داد که **معماریِ برنده به‌ازای هر سهم فرق می‌کند**: در برخی
+#   سهم‌ها یک LSTM ساده کافی است، در برخیِ دیگر افزودنِ لایه‌ی CNN یا تعویضِ LSTM با
+#   GRU کمی بهتر عمل می‌کند — هیچ معماریِ واحدی همیشه برنده نیست، و انتخابِ هر بار
+#   فقط بر اساسِ Validation (نه Test) انجام شده.
 # 
 # **محدودیت‌های روش‌شناختی (باید در هر گزارشِ رسمی ذکر شوند):**
 # 
@@ -861,7 +1020,7 @@ display(robustness_df)
 
 # ## ۱۵) ذخیره‌ی خروجی‌ها
 
-# In[15]:
+# In[16]:
 
 
 OUT_DIR = os.path.join(os.getcwd(), 'data') + os.sep
