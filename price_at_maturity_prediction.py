@@ -32,6 +32,8 @@
 # | هایپرپارامترهای هر مدل | هایپرپارامترِ پیش‌فرض به‌ندرت بهینه است | **تیونینگِ اختصاصیِ هر مدل** روی Validation: `GridSearchCV` (اسکای‌لرن، با CV سفارشیِ Purged) برایِ Ridge/RandomForest؛ Optuna/TPE (بهینه‌سازیِ بیزی، برایِ فضاهایِ پیوسته) برایِ LightGBM/XGBoost/CatBoost؛ Grid Search دستیِ معماری برایِ CNN-LSTM/GRU. تعدادِ ترکیب‌ها در هر گرید عمداً کم نگه داشته شده (۶ تا ۸ ترکیب). |
 # | عدمِ‌قطعیت | یک عددِ تکی برای قیمتِ سررسید در بازارِ پرنوسان گمراه‌کننده است | **رگرسیونِ کوانتایل** (۱۰٪/۵۰٪/۹۰٪) با LightGBMِ تیون‌شده → بازه‌ی پیش‌بینیِ قیمتِ سررسید، نه فقط یک نقطه. |
 # | صداقتِ علمی | انتخابِ مدل روی Test = Data Snooping | مدلِ «پیشنهادی» برای هر سهم فقط بر اساسِ **Validation RMSE** انتخاب می‌شود؛ Test فقط یک‌بار در پایان، صرفاً برای گزارش، لمس می‌شود. یک تست Walk-Forward Robustness (تشخیصی) هم پایداریِ نتیجه را نشان می‌دهد. |
+# | 🆕 داده‌ی کم به‌ازای هر سهم | هر سهم فقط از تاریخچه‌ی خودش (~۲۰۰۰-۳۰۰۰ ردیف) یاد می‌گیرد | فیچرِ **بازدهِ بازارِ Leave-One-Out** (بخشِ ۱.۵) + یک آزمایشِ **مدلِ Pooled** (بخشِ ۱۳.۵) که هر ۶ سهم را با هم آموزش می‌دهد تا ببینیم Pooling واقعاً کمک می‌کند یا نه. |
+# | 🆕 هدف نادرست برای تصمیمِ واقعی | پیش‌بینیِ «قیمتِ دقیق» سخت‌تر از چیزی است که کاورد کال واقعاً لازم دارد | یک هدفِ **هم‌راستا با تصمیم** هم اضافه شده (بخشِ ۱۳.۷): به‌جای قیمتِ دقیق، احتمالِ «عبور از Strike» (طبقِ `STRIKE_PCT` پروژه‌ی اصلی) به‌صورتِ طبقه‌بندی پیش‌بینی می‌شود. |
 # 
 # **الهام‌گیری از ادبیاتِ حرفه‌ای:** ترکیبِ درخت‌های گرادیان‌بوست + شبکه‌ی توالی برای
 # پیش‌بینیِ مالی (Kim & Won, 2018 — hybrid GARCH-LSTM)، معماریِ CNN-LSTM برایِ
@@ -152,7 +154,30 @@ summary_df = pd.DataFrame(summary_rows)
 summary_df
 
 
-# ## ۲) مهندسیِ فیچر — تکنیکال + نوسان + کلان + تقویمی
+# ## ۱.۵) 🆕 فیچرِ هم‌حرکتیِ بازار (Cross-Sectional Leave-One-Out)
+# 
+# تا این‌جا هر سهم فقط از تاریخچه‌ی خودش یاد می‌گرفت — هیچ اطلاعی از این‌که «امروز
+# کلِ بازار چطور بوده» یا «سهم‌های دیگر چه حرکتی داشته‌اند» در فیچرها نبود. چون
+# بورسِ تهران معمولاً روی اخبارِ کلان/سیاسی به‌صورتِ هم‌زمان حرکت می‌کند، بازدهِ
+# هم‌بورسی‌ها می‌تواند سیگنالِ واقعی داشته باشد. برای هر سهم، یک **بازدهِ بازارِ
+# Leave-One-Out** ساخته می‌شود: میانگینِ بازدهِ همان روزِ بقیه‌ی ۵ سهم (بدونِ
+# احتسابِ خودِ سهم — تا فیچر مصنوعاً شبیهِ target نشود). این یک شاخصِ بازارِ
+# داخلی است که فقط از همین ۶ فایلِ CSV ساخته می‌شود (بدون نیاز به دیتای بیرونی).
+
+# In[3]:
+
+
+ret_wide = pd.DataFrame({name: np.log(df['close'] / df['close'].shift(1)) for name, df in processed.items()})
+row_sum = ret_wide.sum(axis=1, skipna=True)
+row_cnt = ret_wide.count(axis=1)
+mkt_loo = pd.DataFrame(index=ret_wide.index)
+for name in ASSET_NAMES:
+    denom = (row_cnt - ret_wide[name].notna().astype(int)).replace(0, np.nan)
+    mkt_loo[name] = (row_sum - ret_wide[name].fillna(0)) / denom
+print(f"✅ بازدهِ بازارِ Leave-One-Out ساخته شد — {ret_wide.shape[0]} روز، {ret_wide.shape[1]} سهم")
+
+
+# ## ۲) مهندسیِ فیچر — تکنیکال + نوسان + کلان + تقویمی + هم‌حرکتیِ بازار
 # 
 # فیچرها در چهار دسته‌ی معنادار ساخته می‌شوند (هیچ‌کدام از آینده استفاده نمی‌کنند —
 # همه‌شان فقط از `close/high/low/vol` تا لحظه‌ی *t* محاسبه می‌شوند):
@@ -163,12 +188,15 @@ summary_df
 # 3. **حجم/جریانِ نقدینگی**: Z-Score حجم، شیبِ OBV.
 # 4. **کلان و تقویمی**: بازده/نوسانِ نرخِ دلارِ آزاد (چون سهم‌های این نمونه عمدتاً
 #    صادرات‌محور یا وابسته به دلار هستند)، روزِ هفته، ماه، پایانِ ماه.
+# 5. 🆕 **هم‌حرکتیِ بازار**: بازدهِ بازارِ Leave-One-Out (بخشِ ۱.۵) و بازدهِ نسبی
+#    (`rel_strength_loo` = بازدهِ خودِ سهم منهایِ بازدهِ بقیه‌ی سهم‌ها) — آیا این سهم
+#    امروز از «میانگینِ بازار» جلوتر بوده یا عقب‌تر.
 # 
 # عمداً فقط از **بازده/نوسانِ کوتاه‌مدتِ دلار** استفاده شده، نه سطحِ خامِ آن — سطحِ خامِ
 # دلار در این بازه تقریباً یک‌طرفه (صعودی) است و می‌تواند صرفاً «زمان» را به مدل نشت
 # بدهد، نه سیگنالِ معاملاتیِ واقعی.
 
-# In[3]:
+# In[4]:
 
 
 def rsi(series, window=14):
@@ -181,7 +209,7 @@ def rsi(series, window=14):
     return 100 - 100 / (1 + rs)
 
 
-def build_features(df, usd=None):
+def build_features(df, usd=None, mkt=None):
     d = pd.DataFrame(index=df.index)
     close = df['close']; high = df.get('high', close); low = df.get('low', close)
     vol = df.get('vol', pd.Series(0, index=df.index))
@@ -230,9 +258,20 @@ def build_features(df, usd=None):
     else:
         for c in ['usd_ret5', 'usd_ret20', 'usd_vol20', 'usd_dev_sma50']:
             d[c] = 0.0
+    if mkt is not None:
+        m = mkt.reindex(df.index)
+        d['mkt_ret_loo'] = m
+        d['mkt_ret_loo5'] = m.rolling(5).sum()
+        d['mkt_ret_loo20'] = m.rolling(20).sum()
+        d['mkt_vol_loo20'] = m.rolling(20).std()
+        d['rel_strength_loo'] = logret - m
+    else:
+        for c in ['mkt_ret_loo', 'mkt_ret_loo5', 'mkt_ret_loo20', 'mkt_vol_loo20', 'rel_strength_loo']:
+            d[c] = 0.0
     return d
 
-print("✅ build_features() آماده است —", len(build_features(processed[ASSET_NAMES[0]], usd_close).columns), "فیچر تولید می‌کند")
+print("✅ build_features() آماده است —",
+      len(build_features(processed[ASSET_NAMES[0]], usd_close, mkt_loo[ASSET_NAMES[0]]).columns), "فیچر تولید می‌کند")
 
 
 # ## ۳) فیچرِ نوسانِ شرطیِ GARCH(1,1)-t
@@ -244,7 +283,7 @@ print("✅ build_features() آماده است —", len(build_features(processed
 # پارامترهای جدید) روی کلِ سری فیلتر می‌شود (`arch_model(...).fix(params)`) — یعنی
 # اطلاعاتِ Test هرگز در تخمینِ پارامترها استفاده نمی‌شود.
 
-# In[4]:
+# In[5]:
 
 
 from arch import arch_model
@@ -277,7 +316,7 @@ print("✅ garch_vol_feature() آماده است")
 # درختی وزنِ نمایی می‌دهیم که ردیف‌های نزدیک‌تر به امروز را مهم‌تر می‌شمارد
 # (Recency Weighting, نیم‌عمر = ۵۰۰ ردیف ≈ ۲ سالِ معاملاتی).
 
-# In[5]:
+# In[6]:
 
 
 def purged_split(n, val_frac, test_frac, purge):
@@ -337,7 +376,7 @@ print("✅ توابعِ Split/Weighting + کلاسِ PurgedWalkForwardCV آما�
 # کارا، به‌خصوص در افق‌های کوتاه، رایج است). از بینِ افق‌هایی که Skill‌شان به بهترین
 # نزدیک است (اصلِ ساده‌گرایی)، کوتاه‌ترین انتخاب می‌شود.
 
-# In[6]:
+# In[7]:
 
 
 import lightgbm as lgb
@@ -438,7 +477,7 @@ print("✅ evaluate_horizon() آماده است")
 # همان هایپرپارامترهای تیون‌شده) آموزش داده می‌شود تا یک **بازه‌ی پیش‌بینیِ قیمتِ
 # سررسید** داشته باشیم.
 
-# In[7]:
+# In[8]:
 
 
 import xgboost as xgb
@@ -627,7 +666,7 @@ print("✅ کلاس/توابعِ مدل‌ها آماده‌اند (Ridge+GridSe
 # ⏱️ اجرای این سلول برای همه‌ی سهم‌ها معمولاً بین ۱ تا ۲ دقیقه طول می‌کشد (شاملِ
 # Optuna tuning و آموزشِ LSTM برای هر سهم).
 
-# In[8]:
+# In[9]:
 
 
 t_start = time.time()
@@ -638,7 +677,7 @@ ASSET_ARTIFACTS = {}
 for name in ASSET_NAMES:
     print(f"\n{'='*72}\n{name}\n{'='*72}")
     df = processed[name]
-    feat_raw = build_features(df, usd_close)
+    feat_raw = build_features(df, usd_close, mkt_loo[name])
     n_all = len(df)
     n_pretest = int(n_all * (1 - TEST_FRAC))
 
@@ -823,7 +862,7 @@ print(f"\n✅ Pipeline برای همه‌ی {len(ASSET_NAMES)} سهم تمام �
 # Optuna یا Grid Search معماری) به چه هایپرپارامترها/معماری‌ای رسیده — تا خروجیِ
 # تیونینگ هم شفاف و قابلِ‌بازبینی باشد، نه یک جعبه‌سیاه.
 
-# In[9]:
+# In[10]:
 
 
 tuning_rows = []
@@ -845,7 +884,7 @@ display(tuning_df)
 # `RMSE_price` و `MAPE_pct` روی **سطحِ قیمتِ بازسازی‌شده** محاسبه شده‌اند (نه روی
 # بازدهِ لگاریتمی)، یعنی دقیقاً همان چیزی که برای «قیمتِ سررسید» اهمیت دارد.
 
-# In[10]:
+# In[11]:
 
 
 results_df = pd.DataFrame(results_rows)
@@ -864,7 +903,7 @@ display(results_df.pivot_table(index='Model', columns='Asset', values='Direction
 # Validation** کمترین خطا را داشته انتخاب شده و فقط در همین یک لحظه، عملکردش روی
 # Test (که تا این‌جا هرگز در انتخاب دخالت نداشته) گزارش می‌شود.
 
-# In[11]:
+# In[12]:
 
 
 best_rows = []
@@ -889,7 +928,7 @@ display(best_model_df)
 # امروز یک اختیارِ خرید با سررسید H روزِ بعد می‌نوشتیم، مدل چه قیمتی برای سهم در همان
 # تاریخِ سررسید پیش‌بینی می‌کرد؟»
 
-# In[12]:
+# In[13]:
 
 
 fig, axes = plt.subplots(len(ASSET_NAMES), 1, figsize=(11, 3.2 * len(ASSET_NAMES)))
@@ -910,7 +949,7 @@ plt.show()
 
 # ## ۱۱) مقایسه‌ی RMSE قیمت بینِ مدل‌ها (نمودارِ میله‌ای)
 
-# In[13]:
+# In[14]:
 
 
 model_order = ['Naive_RW', 'Drift_RW', 'GBM_GARCH', 'Ridge', 'LightGBM', 'XGBoost',
@@ -932,7 +971,7 @@ plt.show()
 # چکِ سلامت: اگر فیچرهای بی‌معنی (مثلِ `dow`/`month`) بالای لیست باشند، نشانه‌ی
 # Overfitting روی نویز است.
 
-# In[14]:
+# In[15]:
 
 
 fig, axes = plt.subplots(2, 3, figsize=(16, 9))
@@ -954,7 +993,7 @@ plt.show()
 # زمانیِ مختلف پایدار است یا محصولِ شانسیِ یک تفکیکِ خاص. فولدها از Train+Val ساخته
 # می‌شوند و هرگز به Test دست نمی‌زنند.
 
-# In[15]:
+# In[16]:
 
 
 robustness_rows = []
@@ -973,6 +1012,247 @@ for name, art in ASSET_ARTIFACTS.items():
                                  Std_RMSE_logret=round(np.std(fold_rmses), 4)))
 robustness_df = pd.DataFrame(robustness_rows)
 display(robustness_df)
+
+
+# ## ۱۳.۵) 🆕 آزمایش: مدلِ Pooled (آموزشِ مشترک روی هر ۶ سهم)
+# 
+# تا این‌جا هر سهم مدلِ کاملاً جداگانه‌ای داشت — یعنی برای مثال LightGBM فقط از
+# ~۲۰۰۰ ردیفِ تاریخیِ همان یک سهم یاد می‌گرفت. ایده: اگر یک مدلِ **مشترک** روی
+# هر ۶ سهم با هم آموزش داده شود (با یک ستونِ دسته‌ایِ «کدامْ‌سهم» به‌صورتِ
+# one-hot)، مدل حدوداً ۶ برابر داده‌ی بیشتر می‌بیند و می‌تواند الگوهای مشترکِ بینِ
+# سهم‌ها (نه فقط الگوهای مخصوصِ یک سهم) را یاد بگیرد — روشی که در ادبیاتِ
+# Cross-Sectional Asset Pricing (Gu, Kelly & Xiu, 2020) استاندارد است.
+# 
+# **روشِ منصفانه‌ی مقایسه:** چون Pooling نیاز به یک بازه‌ی زمانیِ *مشترک* بینِ
+# همه‌ی سهم‌ها دارد (نه افقِ جداگانه‌ی هرکدام)، یک افقِ مشترک — مدِ افق‌های
+# انتخابیِ تک‌سهمیِ بخشِ ۵ — و یک بازه‌ی Train/Val/Test مشترک (بر اساسِ
+# تاریخ‌های واقعی، نه کسری از ردیف‌های هر سهم) تعریف می‌شود. سپس برای هر سهم
+# یک مدلِ **تک‌سهمیِ هم‌سطح** (دقیقاً همان فیچرها، همان بازه‌ی زمانی، فقط بدونِ
+# Pooling) هم آموزش داده می‌شود تا مقایسه‌ی Pooled در برابرِ تک‌سهمی کاملاً
+# apples-to-apples باشد (هر دو روی دقیقاً همان ردیف‌های Test ارزیابی می‌شوند).
+# برای کنترلِ زمانِ اجرا، این آزمایش فقط با LightGBM (رقیبِ اصلیِ Naive تا
+# این‌جا) و بدونِ وزن‌دهیِ زمانی انجام شده — یک آزمایشِ مکمل است، نه جایگزینِ
+# pipeline رسمیِ بخش‌های ۷ تا ۹.
+
+# In[17]:
+
+
+H_POOL = int(pd.Series([art['H'] for art in ASSET_ARTIFACTS.values()]).mode().iloc[0])
+print(f"افقِ مشترک برای مدلِ Pooled: H_POOL = {H_POOL} روزِ معاملاتی (مدِ افق‌های انتخابیِ تک‌سهمی)")
+
+pooled_feats = {}
+for name in ASSET_NAMES:
+    df = processed[name]
+    f = build_features(df, usd_close, mkt_loo[name])
+    f['target'] = np.log(df['close'].shift(-H_POOL) / df['close'])
+    f['price'] = df['close']
+    pooled_feats[name] = f.dropna()
+
+common_start = max(f.index.min() for f in pooled_feats.values())
+common_end = min(f.index.max() for f in pooled_feats.values())
+common_dates = sorted(set.union(*[set(f.index[(f.index >= common_start) & (f.index <= common_end)])
+                                   for f in pooled_feats.values()]))
+n_common = len(common_dates)
+test_size = int(n_common * TEST_FRAC); val_size = int(n_common * VAL_FRAC)
+test_start_date = common_dates[n_common - test_size]
+val_start_date = common_dates[n_common - test_size - val_size]
+print(f"بازه‌ی مشترک: {common_start.date()} تا {common_end.date()} ({n_common} روز) | "
+      f"Val از {val_start_date.date()} | Test از {test_start_date.date()}")
+
+pooled_feature_cols = [c for c in next(iter(pooled_feats.values())).columns if c not in ('target', 'price')]
+train_parts, val_parts, test_parts, single_asset_preds = [], [], [], {}
+
+for name in ASSET_NAMES:
+    f = pooled_feats[name]
+    val_pos = f.index.searchsorted(val_start_date)
+    test_pos = f.index.searchsorted(test_start_date)
+    tr = f.iloc[:max(val_pos - H_POOL, 1)].copy()
+    va = f.iloc[val_pos: max(test_pos - H_POOL, val_pos + 1)].copy()
+    te = f.iloc[test_pos:].copy()
+    for part in (tr, va, te):
+        for other in ASSET_NAMES:
+            part[f'is_{other}'] = 1 if other == name else 0
+        part['asset'] = name
+    train_parts.append(tr); val_parts.append(va); test_parts.append(te)
+
+    Xtr_s, ytr_s = tr[pooled_feature_cols].values, tr['target'].values
+    Xva_s, yva_s = va[pooled_feature_cols].values, va['target'].values
+    Xte_s = te[pooled_feature_cols].values
+    best_s = tune_lgbm(Xtr_s, ytr_s, np.ones(len(Xtr_s)), Xva_s, yva_s, n_trials=15)
+    params_s = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1)
+    params_s.update({'learning_rate': best_s['lr'], 'num_leaves': best_s['num_leaves'],
+                      'min_data_in_leaf': best_s['min_data_in_leaf'], 'feature_fraction': best_s['ff'],
+                      'bagging_fraction': best_s['bf'], 'lambda_l2': best_s['l2']})
+    dtr_s = lgb.Dataset(Xtr_s, label=ytr_s)
+    dval_s = lgb.Dataset(Xva_s, label=yva_s, reference=dtr_s)
+    m_s = lgb.train(params_s, dtr_s, num_boost_round=500, valid_sets=[dval_s],
+                     callbacks=[lgb.early_stopping(40, verbose=False)])
+    single_asset_preds[name] = m_s.predict(Xte_s, num_iteration=m_s.best_iteration)
+
+train_df = pd.concat(train_parts).sort_index()
+val_df = pd.concat(val_parts).sort_index()
+test_df = pd.concat(test_parts).sort_index()
+onehot_cols = [f'is_{a}' for a in ASSET_NAMES]
+Xcols = pooled_feature_cols + onehot_cols
+X_train_p, y_train_p = train_df[Xcols].values, train_df['target'].values
+X_val_p, y_val_p = val_df[Xcols].values, val_df['target'].values
+X_test_p = test_df[Xcols].values
+print(f"ردیف‌های Pooled: train={len(X_train_p)} val={len(X_val_p)} test={len(X_test_p)}")
+
+best_pool = tune_lgbm(X_train_p, y_train_p, np.ones(len(X_train_p)), X_val_p, y_val_p, n_trials=20)
+lgb_pool_params = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1)
+lgb_pool_params.update({'learning_rate': best_pool['lr'], 'num_leaves': best_pool['num_leaves'],
+                         'min_data_in_leaf': best_pool['min_data_in_leaf'], 'feature_fraction': best_pool['ff'],
+                         'bagging_fraction': best_pool['bf'], 'lambda_l2': best_pool['l2']})
+dtr_p = lgb.Dataset(X_train_p, label=y_train_p)
+dval_p = lgb.Dataset(X_val_p, label=y_val_p, reference=dtr_p)
+lgb_pool_model = lgb.train(lgb_pool_params, dtr_p, num_boost_round=600, valid_sets=[dval_p],
+                            callbacks=[lgb.early_stopping(40, verbose=False)])
+test_df = test_df.copy()
+test_df['pred_pool'] = lgb_pool_model.predict(X_test_p, num_iteration=lgb_pool_model.best_iteration)
+
+pool_compare_rows = []
+for name in ASSET_NAMES:
+    sub = test_df[test_df['asset'] == name]
+    price_actual = sub['price'].values * np.exp(sub['target'].values)
+    price_pool = sub['price'].values * np.exp(sub['pred_pool'].values)
+    price_single = sub['price'].values * np.exp(single_asset_preds[name])
+    price_naive = sub['price'].values
+    rmse_pool = np.sqrt(np.mean((price_actual - price_pool) ** 2))
+    rmse_single = np.sqrt(np.mean((price_actual - price_single) ** 2))
+    rmse_naive = np.sqrt(np.mean((price_actual - price_naive) ** 2))
+    da_pool = np.mean(np.sign(sub['pred_pool'].values) == np.sign(sub['target'].values))
+    da_single = np.mean(np.sign(single_asset_preds[name]) == np.sign(sub['target'].values))
+    pool_compare_rows.append(dict(Asset=name, N=len(sub), RMSE_Naive=round(rmse_naive, 1),
+                                   RMSE_SingleAsset_LGBM=round(rmse_single, 1), RMSE_Pooled_LGBM=round(rmse_pool, 1),
+                                   DirAcc_Single=round(da_single, 3), DirAcc_Pooled=round(da_pool, 3),
+                                   Pooling_Beats_SingleAsset=bool(rmse_pool < rmse_single)))
+pool_compare_df = pd.DataFrame(pool_compare_rows)
+display(pool_compare_df)
+n_helped = int(pool_compare_df['Pooling_Beats_SingleAsset'].sum())
+print(f"\nPooling روی {n_helped} از {len(pool_compare_df)} سهم نسبت به مدلِ تک‌سهمیِ هم‌سطح بهتر بود "
+      f"(هر دو روی دقیقاً همان ردیف‌های Test).")
+
+
+# ## ۱۳.۶) نمودار: Naive در برابرِ تک‌سهمی در برابرِ Pooled
+
+# In[18]:
+
+
+fig, ax = plt.subplots(figsize=(11, 5))
+x = np.arange(len(pool_compare_df))
+w = 0.27
+ax.bar(x - w, pool_compare_df['RMSE_Naive'], width=w, label='Naive (no-change)')
+ax.bar(x, pool_compare_df['RMSE_SingleAsset_LGBM'], width=w, label='Single-asset LightGBM')
+ax.bar(x + w, pool_compare_df['RMSE_Pooled_LGBM'], width=w, label='Pooled LightGBM (all 6 assets)')
+ax.set_xticks(x); ax.set_xticklabels(pool_compare_df['Asset'])
+ax.set_ylabel('RMSE of price at maturity (Toman)')
+ax.set_title('Does pooling across assets help? (shared common test window)')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+
+# ## ۱۳.۷) 🆕 آزمایش: مدلِ احتمالِ عبور از Strike (هدفِ هم‌راستا با کاورد کال)
+# 
+# به‌جای پیش‌بینیِ «قیمتِ دقیقِ سررسید» (که دیدیم شکستنِ Naive سخت است)، این
+# بخش هدفی می‌سازد که مستقیماً برای تصمیمِ کاورد کال لازم است: **آیا قیمتِ سهم
+# در سررسید از Strike عبور می‌کند یا نه؟** یعنی یک مسئله‌ی طبقه‌بندیِ دودویی به‌جای
+# رگرسیون. Strike دقیقاً طبقِ همان فرضِ پروژه‌ی اصلی (`covered_call_strategy.py`,
+# `STRIKE_PCT = 0.04`) تعریف می‌شود: Strike = قیمتِ امروز × ۱٫۰۴ (یعنی اختیارِ
+# خرید ۴٪ بالاترِ قیمتِ فعلی فروخته می‌شود). چون این دقیقاً همان بازدهِ H‌روزه‌ای
+# است که قبلاً محاسبه کرده‌ایم، از همان X/y ذخیره‌شده در `ASSET_ARTIFACTS`
+# استفاده می‌شود — بدونِ ساختِ فیچرِ جدید.
+# 
+# baseline در این‌جا AUC=۰.۵ (یک مدلِ همیشه‌ثابت که فقط فراوانیِ تاریخیِ عبور از
+# Strike را برمی‌گرداند) است — اگر LightGBM بتواند AUC معناداری بالاتر از ۰.۵
+# بگیرد، یعنی برخلافِ پیش‌بینیِ نقطه‌ایِ قیمت، این‌جا واقعاً سیگنالی هست.
+
+# In[19]:
+
+
+from sklearn.metrics import roc_auc_score, brier_score_loss
+
+STRIKE_PCT = 0.04   # همان فرضِ STRIKE_PCT در covered_call_strategy.py
+
+
+def tune_lgbm_clf(X_train, y_train, X_val, y_val, n_trials=20):
+    def objective(trial):
+        params = dict(objective='binary', metric='auc', verbose=-1, seed=GLOBAL_SEED,
+                      learning_rate=trial.suggest_float('lr', 0.01, 0.1, log=True),
+                      num_leaves=trial.suggest_int('num_leaves', 7, 31),
+                      min_data_in_leaf=trial.suggest_int('min_data_in_leaf', 20, 100),
+                      feature_fraction=trial.suggest_float('ff', 0.5, 1.0),
+                      bagging_fraction=trial.suggest_float('bf', 0.5, 1.0), bagging_freq=1)
+        dtr = lgb.Dataset(X_train, label=y_train)
+        dval = lgb.Dataset(X_val, label=y_val, reference=dtr)
+        m = lgb.train(params, dtr, num_boost_round=500, valid_sets=[dval],
+                       callbacks=[lgb.early_stopping(40, verbose=False)])
+        pred = m.predict(X_val, num_iteration=m.best_iteration)
+        return -roc_auc_score(y_val, pred)
+    study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return study.best_params
+
+
+strike_rows = []
+strike_preds_store = {}
+for name, art in ASSET_ARTIFACTS.items():
+    y_train_c = (art['y_train'] >= np.log(1 + STRIKE_PCT)).astype(int)
+    y_val_c = (art['y_val'] >= np.log(1 + STRIKE_PCT)).astype(int)
+    y_test_c = (art['y_test'] >= np.log(1 + STRIKE_PCT)).astype(int)
+
+    best_c = tune_lgbm_clf(art['X_train'], y_train_c, art['X_val'], y_val_c, n_trials=20)
+    params_c = dict(objective='binary', metric='auc', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1)
+    params_c.update({'learning_rate': best_c['lr'], 'num_leaves': best_c['num_leaves'],
+                      'min_data_in_leaf': best_c['min_data_in_leaf'], 'feature_fraction': best_c['ff'],
+                      'bagging_fraction': best_c['bf']})
+    dtr_c = lgb.Dataset(art['X_train'], label=y_train_c)
+    dval_c = lgb.Dataset(art['X_val'], label=y_val_c, reference=dtr_c)
+    m_c = lgb.train(params_c, dtr_c, num_boost_round=500, valid_sets=[dval_c],
+                     callbacks=[lgb.early_stopping(40, verbose=False)])
+    p_test = m_c.predict(art['X_test'], num_iteration=m_c.best_iteration)
+    p_naive = np.full(len(y_test_c), y_train_c.mean())
+
+    auc = roc_auc_score(y_test_c, p_test)
+    auc_naive = roc_auc_score(y_test_c, p_naive)
+    brier = brier_score_loss(y_test_c, p_test)
+    brier_naive = brier_score_loss(y_test_c, p_naive)
+    strike_rows.append(dict(Asset=name, Horizon=art['H'], StrikePct=STRIKE_PCT,
+                             PosRate_Train=round(y_train_c.mean(), 3), PosRate_Test=round(y_test_c.mean(), 3),
+                             AUC_LightGBM=round(auc, 3), AUC_Naive=round(auc_naive, 3),
+                             Brier_LightGBM=round(brier, 4), Brier_Naive=round(brier_naive, 4)))
+    strike_preds_store[name] = dict(dates=art['dates_test'], y_true=y_test_c, p_pred=p_test)
+
+strike_df = pd.DataFrame(strike_rows)
+display(strike_df)
+n_better = int((strike_df['AUC_LightGBM'] > strike_df['AUC_Naive'] + 0.02).sum())
+print(f"\nLightGBM در {n_better} از {len(strike_df)} سهم به‌طورِ محسوس (AUC>Naive+0.02) بهتر از حدسِ تصادفی بود.")
+
+
+# ## ۱۳.۸) نمودار AUC و نمونه‌ی پیش‌بینیِ احتمالِ عبور از Strike
+
+# In[20]:
+
+
+fig, ax = plt.subplots(figsize=(9, 4.5))
+x = np.arange(len(strike_df))
+w = 0.35
+ax.bar(x - w/2, strike_df['AUC_Naive'], width=w, label='Naive (constant probability)', color='gray')
+ax.bar(x + w/2, strike_df['AUC_LightGBM'], width=w, label='LightGBM (tuned)', color='#2ca02c')
+ax.axhline(0.5, color='black', ls=':', lw=1)
+ax.set_xticks(x); ax.set_xticklabels(strike_df['Asset'])
+ax.set_ylabel('AUC — P(price at maturity ≥ strike)')
+ax.set_title(f'Strike-crossing classifier (strike = +{STRIKE_PCT:.0%}) — Test set')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+best_asset = strike_df.loc[(strike_df['AUC_LightGBM'] - strike_df['AUC_Naive']).idxmax(), 'Asset']
+p = strike_preds_store[best_asset]
+sample = pd.DataFrame({'date': p['dates'], 'crossed_strike': p['y_true'], 'predicted_prob': p['p_pred'].round(3)}).tail(10)
+print(f"\nنمونه برای {best_asset} (بیشترین بهبودِ AUC نسبت به Naive):")
+display(sample)
 
 
 # ## ۱۴) نتیجه‌گیریِ صادقانه و محدودیت‌ها
@@ -1001,6 +1281,15 @@ display(robustness_df)
 #   سهم‌ها یک LSTM ساده کافی است، در برخیِ دیگر افزودنِ لایه‌ی CNN یا تعویضِ LSTM با
 #   GRU کمی بهتر عمل می‌کند — هیچ معماریِ واحدی همیشه برنده نیست، و انتخابِ هر بار
 #   فقط بر اساسِ Validation (نه Test) انجام شده.
+# - **آزمایشِ Pooling (بخشِ ۱۳.۵)**: نتیجه‌ی دقیق (چند سهم بهتر شدند) در جدولِ همان
+#   بخش است — هرچه باشد، صادقانه گزارش شده؛ Pooling یک تکنیکِ معقول است، نه تضمینِ
+#   بهبود، چون سهم‌های مختلف می‌توانند دینامیک‌های واقعاً متفاوتی داشته باشند که
+#   ترکیب‌کردنِ دادۀشان لزوماً کمک نمی‌کند.
+# - **آزمایشِ احتمالِ عبور از Strike (بخشِ ۱۳.۷)**: چون این هدف مستقیماً هم‌راستا با
+#   تصمیمِ کاورد کال است (نه یک رگرسیونِ عمومی)، AUC آن نسبت به Naive باید جداگانه
+#   دیده شود — طبقِ جدولِ همان بخش. اگر AUC معناداری بالاتر از ۰.۵ به‌دست آمده باشد،
+#   یعنی حتی وقتی سطحِ قیمت قابل‌پیش‌بینی نیست، «عبور کردن یا نکردن از یک سطحِ خاص»
+#   می‌تواند سیگنالِ قابل‌استفاده‌ای داشته باشد.
 # 
 # **محدودیت‌های روش‌شناختی (باید در هر گزارشِ رسمی ذکر شوند):**
 # 
@@ -1020,13 +1309,15 @@ display(robustness_df)
 
 # ## ۱۵) ذخیره‌ی خروجی‌ها
 
-# In[16]:
+# In[21]:
 
 
 OUT_DIR = os.path.join(os.getcwd(), 'data') + os.sep
 results_df.to_csv(OUT_DIR + 'price_at_maturity_results.csv', index=False)
 best_model_df.to_csv(OUT_DIR + 'price_at_maturity_recommended_models.csv', index=False)
 robustness_df.to_csv(OUT_DIR + 'price_at_maturity_walkforward_robustness.csv', index=False)
+pool_compare_df.to_csv(OUT_DIR + 'price_at_maturity_pooled_vs_single.csv', index=False)
+strike_df.to_csv(OUT_DIR + 'price_at_maturity_strike_crossing_auc.csv', index=False)
 
 horizon_log_rows = []
 for name, art in ASSET_ARTIFACTS.items():
@@ -1042,7 +1333,8 @@ for name in ASSET_NAMES:
 
 print("✅ خروجی‌ها ذخیره شدند:")
 for f in ['price_at_maturity_results.csv', 'price_at_maturity_recommended_models.csv',
-          'price_at_maturity_walkforward_robustness.csv', 'price_at_maturity_horizon_selection.csv']:
+          'price_at_maturity_walkforward_robustness.csv', 'price_at_maturity_horizon_selection.csv',
+          'price_at_maturity_pooled_vs_single.csv', 'price_at_maturity_strike_crossing_auc.csv']:
     print('  -', f)
 print(f"  - price_at_maturity_predictions_<asset>.csv برای هر یک از {len(ASSET_NAMES)} سهم")
 
