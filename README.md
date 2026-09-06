@@ -76,6 +76,22 @@ Strike، تعداد/نوع مدل‌ها) را تغییر نداده — فقط 
 ⚠️ این نسخه عمداً فقط تا «پیش‌بینیِ دقیقِ قیمتِ سررسید» پیش رفته؛ اتصال به موتورِ
 کاملِ بک‌تستِ کاورد کال (Strike/Premium/Sharpe) گامِ بعدی است.
 
+## 🆕 ساختِ پورتفو (`portfolio_construction.ipynb`)
+
+با استفاده از خروجی‌های واقعیِ نوت‌بوکِ بالا (بدونِ هیچ پیش‌بینیِ جدید)، وزنِ هر
+یک از ۶ سهم در یک پورتفو ساخته می‌شود — طوری که مجموعِ وزن‌ها دقیقاً ۱ شود.
+روش: **Black-Litterman** (Black & Litterman, 1992) با کوواریانسِ
+**Ledoit-Wolf Shrinkage** (2004)، دیدگاه‌ها (Views) مستقیماً از پیش‌بینیِ
+مدلِ Ensemble و عدمِ‌قطعیتِ هر دیدگاه از RMSEِ واقعیِ همان مدل، و محدودیتِ وزنِ
+۵٪-۳۰٪ برایِ جلوگیری از تمرکزِ افراطی (مشکلِ شناخته‌شده‌ی Michaud, 1989). برایِ
+اعتبارسنجی، با Hierarchical Risk Parity (López de Prado, 2016)، Minimum-Variance،
+Equal-Weight، و وزنِ متناسب با ارزشِ معاملات مقایسه شده و یک نمودارِ مرزِ کارا
+(Efficient Frontier) هم رسم می‌شود.
+
+اجرا: `jupyter nbconvert --to notebook --execute portfolio_construction.ipynb`.
+خروجیِ نهایی در `data/portfolio_weights_black_litterman.csv` و مقایسه‌ی همه‌ی
+روش‌ها در `data/portfolio_methods_comparison.csv` ذخیره می‌شود.
+
 ## اعتبارسنجی
 
 نسخهٔ فعلی با یک Smoke Test کامل (تعداد trial کاهش‌یافته) روی همین ۵ فایل CSV
