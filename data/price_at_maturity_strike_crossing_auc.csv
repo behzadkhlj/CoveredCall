@@ -1,0 +1,7 @@
+Asset,Horizon,StrikePct,PosRate_Train,PosRate_Test,AUC_LightGBM,AUC_Naive,Brier_LightGBM,Brier_Naive
+Fameli,10,0.04,0.317,0.301,0.495,0.5,0.211,0.2107
+Fulad,10,0.04,0.333,0.288,0.506,0.5,0.2073,0.2069
+IranKhodro,10,0.04,0.338,0.326,0.487,0.5,0.2202,0.22
+Khgostar,10,0.04,0.373,0.341,0.527,0.5,0.2257,0.2258
+Shapna,10,0.04,0.367,0.329,0.493,0.5,0.2391,0.2222
+VebMellat,20,0.04,0.396,0.376,0.426,0.5,0.2366,0.2349
