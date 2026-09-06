@@ -31,7 +31,17 @@
 # نتیجه صرفاً بازتابِ فرضِ «بازار کارا است» می‌شود و هیچ‌جایی برایِ دیدگاهِ
 # مدلِ ML باقی نمی‌ماند — دقیقاً برعکسِ چیزی که خواسته شده.
 # 
-# **معیارِ انتخاب:** به‌جایِ بیشینه‌کردنِ صرفِ «بازدهِ موردِانتظار» (که به‌طورِ
+# **فرمولِ بازدهِ سالانه‌شده** — طبقِ Cost-Basisِ خالص و پایه‌ی تقویمی (استانداردِ
+# صنعتِ آپشن، McMillan؛ Options Industry Council/Cboe)، نه صرفاً تقسیم بر قیمتِ
+# خام:
+# 
+# $$Annualized\ Return = \left(\frac{E[\min(S_T,K)]}{S_0 - C_0}\right)^{\frac{365}{DTE}} - 1$$
+# 
+# که $S_0-C_0$ (قیمتِ سهم منهایِ پرمیومِ دریافتی) سرمایه‌ی خالصِ درگیرشده است —
+# نه خودِ $S_0$ — و $DTE$ روزهایِ **تقویمی** تا سررسید است (نه روزِ معاملاتی؛
+# سررسیدِ قراردادهایِ آپشن همیشه با تقویم شمرده می‌شود).
+# 
+# **معیارِ انتخاب:** به‌جایِ بیشینه‌کردنِ صرفِ این بازدهِ موردِانتظار (که به‌طورِ
 # سیستماتیک به‌سمتِ اختیارهایِ عمیقاً خارج‌از‌پول با پرمیومِ ناچیز سوق پیدا
 # می‌کند — چون اگر دیدگاهِ شما صعودی باشد، صرفِ بازده همیشه می‌گوید «کمتر
 # پوشش بده»)، از یک **مطلوبیتِ میانگین-واریانس** (Mean-Variance Utility)
@@ -43,8 +53,11 @@
 # استفاده شد — برایِ هماهنگیِ کاملِ روش‌شناسی در سرتاسرِ پروژه.
 # 
 # **رفرنس‌های اصلی:**
+# - Black, F. & Scholes, M. (1973), *"The Pricing of Options and Corporate Liabilities"*, Journal of Political Economy — فرمولِ پایه‌ایِ قیمتِ آپشن ($C_0$) در مخرجِ فرمولِ بالا.
 # - Whaley, R.E. (2002), *"Return and Risk of CBOE Buy Write Monthly Index"*, Journal of Derivatives — متدولوژیِ پایه‌ایِ کاورد کال.
-# - Israelov, R. & Nielsen, L.N. (2014), *"Covered Calls Uncovered"*, Financial Analysts Journal (AQR) — نشان می‌دهد در بازارهای بسیار صعودی، کاورد کال ذاتاً عملکردِ ضعیف‌تری دارد؛ دقیقاً همان چیزی که برایِ سهم‌هایِ با دیدگاهِ بسیار صعودی در این تحلیل هم دیده می‌شود.
+# - Hill, J.M., Balasubramanian, V., Gregory, K.B. & Tierens, I. (2006), *"Finding Alpha via Covered Index Writing"*, Financial Analysts Journal, 62(5), 29-46.
+# - Israelov, R. & Nielsen, L.N. (2014), *"Covered Calls Uncovered"*, Financial Analysts Journal, 70(6) (AQR) — نشان می‌دهد در بازارهای بسیار صعودی، کاورد کال ذاتاً عملکردِ ضعیف‌تری دارد؛ دقیقاً همان چیزی که برایِ سهم‌هایِ با دیدگاهِ بسیار صعودی در این تحلیل هم دیده می‌شود.
+# - McMillan, L.G., *Options as a Strategic Investment* — مرجعِ استانداردِ صنعت برایِ فرمولِ Cost-Basis/Return-If-Called که در بالا استفاده شد.
 # - Hull, J.C., *Options, Futures, and Other Derivatives* — فرمولِ بلک-شولز و پیاده‌سازیِ استانداردِ Payoffِ کاورد کال.
 
 # In[1]:
@@ -212,23 +225,24 @@ print("✅ توابعِ قیمت‌گذاری/پی‌آف آماده‌اند")
 # In[5]:
 
 
+DAYCOUNT = 365.0   # روزِ تقویمی — سررسیدِ آپشن‌ها همیشه با تقویم شمرده می‌شود، نه روزِ معاملاتی
+
 grid_rows = []
 for name in ASSET_NAMES:
     v = views[name]
     S0, mu_ann, sigma_ann_view, sigma_bs_ann = v['S0'], v['mu_ann'], v['sigma_ann_view'], v['sigma_bs_ann']
-    for T_days in MATURITY_GRID:
-        T = T_days / 252
+    for T_days in MATURITY_GRID:                      # T_days = روزهای تقویمیِ تا سررسید (DTE)
+        T = T_days / DAYCOUNT                          # سالِ کسری، با همان پایه‌ی تقویمی که sigma/mu با آن سالانه شده‌اند
         for otm in OTM_GRID:
             K = S0 * (1 + otm)
             premium = black_scholes_call(S0, K, T, RISK_FREE_RATE, sigma_bs_ann)
             e_min, var_min, p_assign = covered_call_physical_moments(S0, K, T, mu_ann, sigma_ann_view)
-            fv_premium = premium * np.exp(RISK_FREE_RATE * T)
-            exp_ret = (fv_premium + e_min) / S0 - 1
-            ann_exp_ret = (1 + exp_ret) ** (252 / T_days) - 1
-            ann_var_ret = (var_min / S0 ** 2) * (252 / T_days)
+            cost_basis = S0 - premium                  # سرمایه‌ی خالصِ درگیرشده (طبقِ McMillan / OIC)
+            ann_exp_ret = (e_min / cost_basis) ** (DAYCOUNT / T_days) - 1
+            ann_var_ret = (var_min / cost_basis ** 2) * (DAYCOUNT / T_days)
             utility = ann_exp_ret - 0.5 * DELTA * ann_var_ret
-            static_return = (premium / S0) * (252 / T_days)
-            return_if_exercised = ((fv_premium + K - S0) / S0) * (252 / T_days)
+            static_return = (S0 / cost_basis) ** (DAYCOUNT / T_days) - 1
+            return_if_exercised = (K / cost_basis) ** (DAYCOUNT / T_days) - 1
             grid_rows.append(dict(Asset=name, Maturity_days=T_days, OTM_pct=otm, Strike=K,
                                    Premium_pct=premium / S0, P_assignment=p_assign,
                                    Static_Return_Ann=static_return, ReturnIfExercised_Ann=return_if_exercised,
