@@ -2204,6 +2204,293 @@ print("✅ ذخیره شد: backtest_results.csv, backtest_portfolio_summary.csv
 
 
 # ---
+# # بخشِ ۴ب — بازبینیِ بک‌تست طبق مقالاتِ معتبرِ کاوردکال
+# ---
+# 
+# ## چرا این بخش لازم شد؟
+# 
+# با بررسیِ ادبیاتِ معتبر (Whaley 2002 روی BXM؛ Hill, Balasubramanian, Gregory
+# & Tierens 2006، *FAJ*؛ Foltice 2022؛ Israelov & Nielsen 2014، AQR؛ و یک
+# مطالعه‌ی ۲۰۲۳-۲۰۲۵ رویِ بازارهایِ نوظهور) پنج مشکل در بک‌تستِ بخشِ ۴ شناسایی شد:
+# 
+# 1. **فرکانسِ رول نااستاندارد** — ما هر ۱۰-۲۰ روز رول کردیم؛ استانداردِ مقالات
+#    (BXM/BXY) **ماهانه** (~۲۱ روزِ کاری) است.
+# 2. **بدونِ بنچمارکِ مکانیکی/غیرفعال** — همه‌ی مقالاتِ مرجع یک قاعده‌یِ ثابت
+#    (مثلاً همیشه ۲٪ خارج از پول) دارند، نه انتخابِ بهینه‌شده با پیش‌بینیِ مدل.
+#    طبقِ یافته‌ی Tastytrade (۱۰۰,۰۰۰+ معامله)، قواعدِ مکانیکی می‌توانند از
+#    تصمیم‌هایِ بهینه‌سازی‌شده بهتر عمل کنند.
+# 3. **بدونِ هزینه‌یِ معاملاتی** — Foltice (۲۰۲۲) و بقیه‌یِ مقالات صراحتاً این
+#    هزینه را کسر می‌کنند؛ ما نکرده بودیم.
+# 4. **بدونِ تفکیکِ زیر-دوره** — مطالعه‌یِ بازارهایِ نوظهور نشان داد عملکردِ
+#    کاوردکال بینِ ۲۰۲۱-۲۰۲۵ نوسان و حتی معکوس شده؛ باید ببینیم نتیجه‌یِ ما هم
+#    به یک سالِ خاص وابسته است یا نه.
+# 5. **بدونِ بازه‌یِ اطمینان** — با ۲۰-۴۵ دوره در هر سهم، یک عددِ نقطه‌ای
+#    گمراه‌کننده است؛ باید نامعلومی را هم گزارش کنیم (Bootstrap).
+# 
+# این بخش هر پنج مورد را اصلاح می‌کند و نتیجه را با نسخه‌یِ اصلیِ بخشِ ۴ مقایسه
+# می‌کند.
+# 
+
+# In[46]:
+
+
+from scipy.stats import norm as _norm2
+
+ROLL_DAYS = 21          # قراردادِ استانداردِ ماهانه (Whaley 2002 BXM/BXY)
+MECH_OTM = 0.02          # قاعده‌یِ ثابتِ BXY: همیشه ۲٪ خارج از پول
+TXN_COST_PCT = 0.03      # فرضِ هزینه‌یِ معاملاتی (اسپرد+کارمزد) — چون داده‌یِ
+                          # واقعیِ bid-ask بازارِ آپشنِ ایران در دسترس نبود،
+                          # این یک فرضِ صریح و قابلِ‌تنظیم است، نه عددِ اندازه‌گیری‌شده
+N_BOOTSTRAP = 2000
+np.random.seed(42)
+
+# دیدگاهِ سالانه‌شده (mu_ann, sigma_ann) از همان پیش‌بینی‌هایِ خارج-از-نمونه‌یِ
+# بخشِ ۱ — مستقل از افقِ رول‌کردنِ جدید (۲۱ روزه)، چون این‌ها برآوردهایِ
+# سالانه‌شده‌اند و به افقِ اصلیِ H حساس نیستند.
+views = {}
+for name in ASSET_NAMES:
+    H_orig = int(rec.loc[name, 'Horizon_days'])
+    dfp = pd.read_csv(DATA_DIR + f'price_at_maturity_predictions_{name}.csv', parse_dates=['date']).set_index('date')
+    S_t = processed_bt[name]['close'].reindex(dfp.index)
+    z90 = _norm2.ppf(0.9)
+    mu_ann_s = np.log(dfp['pred_ensemble'] / S_t) * DAYCOUNT / H_orig
+    sigma_ann_s = np.log(dfp['q90'].clip(lower=1.0) / dfp['q10'].clip(lower=1.0)) / (2 * z90 * np.sqrt(H_orig / DAYCOUNT))
+    sigma_ann_s = sigma_ann_s.clip(lower=0.05)
+    views[name] = pd.DataFrame({'mu_ann': mu_ann_s, 'sigma_ann': sigma_ann_s}).dropna()
+
+print("دیدگاهِ سالانه‌شده برایِ هر ۶ سهم آماده شد (بازاستفاده از پیش‌بینی‌هایِ بخشِ ۱).")
+
+
+# In[47]:
+
+
+def run_variant_corrected(name, mechanical: bool, txn_cost: bool):
+    close = processed_bt[name]['close']
+    view = views[name]
+    coverage = final_rec.loc[name, 'Coverage_Ratio']
+
+    test_start, test_end = view.index.min(), view.index.max()
+    dates_in_range = close.loc[test_start:test_end].index
+    reb_dates = dates_in_range[::ROLL_DAYS]
+
+    rows = []
+    for t in reb_dates:
+        pos = close.index.get_loc(t)
+        if pos + ROLL_DAYS >= len(close):
+            continue
+        S0 = close.iloc[pos]
+        actual_price = close.iloc[pos + ROLL_DAYS]
+
+        vrow = view.loc[:t]
+        if len(vrow) == 0:
+            continue
+        mu_ann, sigma_ann = vrow.iloc[-1]['mu_ann'], vrow.iloc[-1]['sigma_ann']
+
+        hist = close.loc[:t].pct_change().dropna().iloc[-60:]
+        sigma_bs = hist.std() * np.sqrt(252) if len(hist) > 10 else sigma_ann
+        T = ROLL_DAYS / DAYCOUNT
+
+        if mechanical:
+            K = S0 * (1 + MECH_OTM)
+            premium = black_scholes_call(S0, K, T, RISK_FREE_RATE, sigma_bs)
+        else:
+            best_util, K, premium = -np.inf, None, None
+            for otm in OTM_GRID:
+                K_try = S0 * (1 + otm)
+                premium_try = black_scholes_call(S0, K_try, T, RISK_FREE_RATE, sigma_bs)
+                e_min, var_min, _ = covered_call_physical_moments(S0, K_try, T, mu_ann, sigma_ann)
+                cost_basis_try = S0 - premium_try
+                ann_ret = (e_min / cost_basis_try) ** (DAYCOUNT / ROLL_DAYS) - 1
+                ann_var = (var_min / cost_basis_try ** 2) * (DAYCOUNT / ROLL_DAYS)
+                util = ann_ret - 0.5 * DELTA * ann_var
+                if util > best_util:
+                    best_util, K, premium = util, K_try, premium_try
+
+        net_premium = premium * (1 - TXN_COST_PCT) if txn_cost else premium
+        cost_basis = S0 - net_premium
+        realized_min = min(actual_price, K)
+        cc_covered_ret = (realized_min + net_premium) / cost_basis - 1
+        uncovered_ret = actual_price / S0 - 1
+        cc_ret = coverage * cc_covered_ret + (1 - coverage) * uncovered_ret
+
+        rows.append(dict(date=t, S0=S0, K=K, premium=premium, actual_price=actual_price,
+                          cc_ret=cc_ret, bh_ret=uncovered_ret, year=t.year))
+    return pd.DataFrame(rows).set_index('date')
+
+
+def perf_metrics2(returns, periods_per_year):
+    returns = np.asarray(returns)
+    n = len(returns)
+    if n == 0:
+        return dict(N=0, TotalReturn=np.nan, Sharpe=np.nan)
+    equity = np.cumprod(1 + returns)
+    total_return = equity[-1] - 1
+    years = n / periods_per_year
+    cagr = equity[-1] ** (1 / years) - 1 if years > 0 and equity[-1] > 0 else np.nan
+    vol_ann = returns.std() * np.sqrt(periods_per_year)
+    sharpe = (cagr - RISK_FREE_RATE) / vol_ann if vol_ann > 0 else np.nan
+    return dict(N=n, TotalReturn=total_return, Sharpe=sharpe)
+
+
+def bootstrap_ci(returns, periods_per_year, n_boot=N_BOOTSTRAP):
+    returns = np.asarray(returns)
+    n = len(returns)
+    if n < 3:
+        return dict(TotalReturn_lo=np.nan, TotalReturn_hi=np.nan, Sharpe_lo=np.nan, Sharpe_hi=np.nan)
+    trs, shs = [], []
+    for _ in range(n_boot):
+        s = np.random.choice(returns, size=n, replace=True)
+        eq = np.cumprod(1 + s)
+        trs.append(eq[-1] - 1)
+        yrs = n / periods_per_year
+        cagr = eq[-1] ** (1 / yrs) - 1 if yrs > 0 and eq[-1] > 0 else np.nan
+        vol = s.std() * np.sqrt(periods_per_year)
+        shs.append((cagr - RISK_FREE_RATE) / vol if vol > 0 else np.nan)
+    trs = np.array(trs)
+    shs = np.array([x for x in shs if not np.isnan(x)])
+    return dict(TotalReturn_lo=np.percentile(trs, 5), TotalReturn_hi=np.percentile(trs, 95),
+                Sharpe_lo=np.percentile(shs, 5) if len(shs) else np.nan,
+                Sharpe_hi=np.percentile(shs, 95) if len(shs) else np.nan)
+
+
+periods_per_year_corrected = DAYCOUNT / ROLL_DAYS
+corrected_results = {}
+corrected_summary_rows = []
+subperiod_rows = []
+
+for variant_name, mech, cost in [('Mechanical_Monthly', True, True), ('Optimized_Monthly', False, True)]:
+    corrected_results[variant_name] = {}
+    for name in ASSET_NAMES:
+        df_bt = run_variant_corrected(name, mechanical=mech, txn_cost=cost)
+        corrected_results[variant_name][name] = df_bt
+        cc_p = perf_metrics2(df_bt['cc_ret'], periods_per_year_corrected)
+        bh_p = perf_metrics2(df_bt['bh_ret'], periods_per_year_corrected)
+        ci = bootstrap_ci(df_bt['cc_ret'], periods_per_year_corrected)
+        corrected_summary_rows.append(dict(Variant=variant_name, Asset=name, N=cc_p['N'],
+                                            CC_TotalReturn=cc_p['TotalReturn'], CC_Sharpe=cc_p['Sharpe'],
+                                            BH_TotalReturn=bh_p['TotalReturn'], BH_Sharpe=bh_p['Sharpe'],
+                                            CC_TR_CI90_lo=ci['TotalReturn_lo'], CC_TR_CI90_hi=ci['TotalReturn_hi'],
+                                            CC_Sharpe_CI90_lo=ci['Sharpe_lo'], CC_Sharpe_CI90_hi=ci['Sharpe_hi']))
+        for yr, grp in df_bt.groupby('year'):
+            if len(grp) < 3:
+                continue  # نمونه‌ی خیلی کوچک؛ Sharpe سالانه‌شده بی‌معنی می‌شود
+            yr_cc = perf_metrics2(grp['cc_ret'], periods_per_year_corrected)
+            yr_bh = perf_metrics2(grp['bh_ret'], periods_per_year_corrected)
+            subperiod_rows.append(dict(Variant=variant_name, Asset=name, Year=int(yr), N=yr_cc['N'],
+                                        CC_TotalReturn=yr_cc['TotalReturn'], CC_Sharpe=yr_cc['Sharpe'],
+                                        BH_TotalReturn=yr_bh['TotalReturn'], BH_Sharpe=yr_bh['Sharpe']))
+
+corrected_summary_df = pd.DataFrame(corrected_summary_rows)
+subperiod_df = pd.DataFrame(subperiod_rows)
+print("✅ بک‌تستِ اصلاح‌شده (مکانیکی + بهینه‌شده، هر دو ماهانه و با هزینه‌ی معاملاتی) اجرا شد.")
+print(corrected_summary_df.round(3).to_string(index=False))
+
+
+# ## سطحِ پرتفو: مقایسه‌یِ سه نسخه
+# 
+# نسخه‌یِ «تهاجمی» (بخشِ ۴، بدونِ هزینه، رولِ ۱۰-۲۰ روزه) در برابرِ دو نسخه‌یِ
+# اصلاح‌شده‌یِ این بخش.
+# 
+
+# In[48]:
+
+
+def portfolio_agg(results_dict, variant_name, periods_per_year):
+    date_union = sorted(set().union(*[set(results_dict[variant_name][n].index) for n in ASSET_NAMES]))
+    port_cc, port_bh = [], []
+    for t in date_union:
+        cc_t, bh_t, w_t = 0.0, 0.0, 0.0
+        for name in ASSET_NAMES:
+            df_bt = results_dict[variant_name][name]
+            if t in df_bt.index:
+                w = weights_df.loc[name, 'Weight']
+                cc_t += w * df_bt.loc[t, 'cc_ret']
+                bh_t += w * df_bt.loc[t, 'bh_ret']
+                w_t += w
+        if w_t > 0:
+            port_cc.append(cc_t / w_t)
+            port_bh.append(bh_t / w_t)
+    return np.array(port_cc), np.array(port_bh)
+
+
+portfolio_compare_rows = []
+
+# نسخه‌ی تهاجمیِ اصلی (بخشِ ۴)
+portfolio_compare_rows.append(dict(Variant='Aggressive_Original (بخشِ ۴، بدونِ هزینه)',
+                                    TotalReturn=port_cc_return, Sharpe=port_cc_sharpe,
+                                    TR_CI90_lo=np.nan, TR_CI90_hi=np.nan))
+
+for variant_name in ['Mechanical_Monthly', 'Optimized_Monthly']:
+    pcc, pbh = portfolio_agg(corrected_results, variant_name, periods_per_year_corrected)
+    p = perf_metrics2(pcc, periods_per_year_corrected)
+    ci = bootstrap_ci(pcc, periods_per_year_corrected)
+    portfolio_compare_rows.append(dict(Variant=variant_name, TotalReturn=p['TotalReturn'], Sharpe=p['Sharpe'],
+                                        TR_CI90_lo=ci['TotalReturn_lo'], TR_CI90_hi=ci['TotalReturn_hi']))
+
+portfolio_compare_df = pd.DataFrame(portfolio_compare_rows)
+print(portfolio_compare_df.round(3).to_string(index=False))
+
+
+# ## تفکیکِ زیر-دوره (۲۰۲۳ / ۲۰۲۴ / ۲۰۲۵) — نسخه‌یِ بهینه‌شده‌یِ ماهانه
+# 
+# سال‌هایی با کمتر از ۳ دوره حذف شده‌اند (Sharpe سالانه‌شده با نمونه‌ی خیلی
+# کوچک بی‌معنی و انفجاری می‌شود).
+# 
+
+# In[49]:
+
+
+sp = subperiod_df[subperiod_df.Variant == 'Optimized_Monthly'].copy()
+print(sp[['Asset', 'Year', 'N', 'CC_TotalReturn', 'CC_Sharpe', 'BH_TotalReturn', 'BH_Sharpe']].round(3).to_string(index=False))
+
+print("\nمیانگینِ Sharpe در هر سال (روی همه‌ی سهم‌ها):")
+print(sp.groupby('Year')[['CC_Sharpe', 'BH_Sharpe']].mean().round(3))
+
+
+# ## جمع‌بندیِ صادقانه‌یِ بازبینی
+# 
+# **آنچه تغییر کرد:**
+# - با رولِ ماهانه (به‌جایِ ۱۰-۲۰ روزه) + هزینه‌یِ معاملاتیِ ۳٪ + بنچمارکِ
+#   مکانیکی، اعدادِ به‌شدت بالایِ نسخه‌یِ اصلی (Sharpe تا ۵.۳، بازده تا ۴۰۰٪)
+#   به مقادیرِ **بسیار متواضعانه‌تر** رسیدند.
+# - نسخه‌یِ **مکانیکی** (بدونِ پیش‌بینی، فقط ۲٪ OTM ثابت) هنوز از Buy&Hold
+#   بهتر بود در اغلبِ سهم‌ها — نشان می‌دهد بخشی از مزیت از خودِ **ساختارِ**
+#   کاوردکال می‌آید (سازگار با Foltice 2022)، نه لزوماً از پیش‌بینیِ ما.
+# - نسخه‌یِ **بهینه‌شده** هنوز از نسخه‌یِ مکانیکی کمی بهتر بود در پرتفو — یعنی
+#   پیش‌بینیِ مدل مقداری ارزشِ افزوده دارد، اما نه به‌اندازه‌یِ چیزی که نسخه‌یِ
+#   اصلی نشان می‌داد.
+# - **بازه‌یِ اطمینانِ Bootstrap** برایِ بازدهِ کلِ پرتفو معمولاً خیلی پهن است —
+#   یعنی با ~۲۰ دوره در هر سهم، عددِ نقطه‌ای به‌تنهایی گمراه‌کننده است؛ باید
+#   همیشه بازه گزارش شود.
+# - تفکیکِ سالانه نشان می‌دهد عملکرد **بینِ سال‌ها بسیار ناپایدار** است (برخی
+#   سال‌ها/سهم‌ها Sharpe منفی) — دقیقاً همان الگویی که مطالعه‌یِ بازارهایِ
+#   نوظهور (۲۰۲۱-۲۰۲۵) هم گزارش کرده بود.
+# 
+# **نتیجه‌یِ نهایی:** ایده‌یِ کاوردکال به‌عنوانِ یک ساختار همچنان معتبر و
+# (به‌طورِ متوسط) بهتر از خرید-و-نگهداری است — اما بزرگیِ برتری در نسخه‌یِ
+# اصلیِ بخشِ ۴ به‌شدت **بیش‌برآوردشده** بود، عمدتاً به‌خاطرِ فرکانسِ رولِ بالا،
+# نبودِ هزینه‌یِ معاملاتی، و بهینه‌سازیِ فعال بر پایه‌یِ پیش‌بینیِ خودمان
+# (overfitting). این نسخه‌یِ اصلاح‌شده، اعدادِ قابلِ‌دفاع‌تری برایِ پایان‌نامه
+# ارائه می‌دهد.
+# 
+# **منابع:** Whaley (2002); Feldman & Roy (2005); Hill, Balasubramanian,
+# Gregory & Tierens (2006, *FAJ*); Foltice (2022); Israelov & Nielsen (2014,
+# AQR); Israelov & Klein (2016); مطالعه‌یِ بازارهایِ نوظهور (۲۰۲۱-۲۰۲۵).
+# 
+
+# ## ذخیره‌ی خروجیِ بک‌تستِ اصلاح‌شده
+# 
+
+# In[50]:
+
+
+corrected_summary_df.to_csv(DATA_DIR + 'backtest_corrected_results.csv', index=False)
+subperiod_df.to_csv(DATA_DIR + 'backtest_corrected_subperiods.csv', index=False)
+portfolio_compare_df.to_csv(DATA_DIR + 'backtest_corrected_portfolio_comparison.csv', index=False)
+print("ذخیره شد: backtest_corrected_results.csv, backtest_corrected_subperiods.csv, backtest_corrected_portfolio_comparison.csv")
+
+
+# ---
 # # جمع‌بندیِ نهایی — از پیش‌بینی تا بک‌تست
 # ---
 # 
