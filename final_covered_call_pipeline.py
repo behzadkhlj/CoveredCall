@@ -1103,6 +1103,28 @@ for f in ['price_at_maturity_results.csv', 'price_at_maturity_recommended_models
 print(f"  - price_at_maturity_predictions_<asset>.csv برای هر یک از {len(ASSET_NAMES)} سهم")
 
 
+# ## خلاصه: قیمتِ واقعی در برابرِ قیمتِ پیش‌بینی‌شده در سررسید
+# 
+# پیش از رفتن به ساختِ پورتفو، این جدول نشان می‌دهد مدلِ Ensemble در آخرین
+# روزهایِ Test دقیقاً چه اعدادی پیش‌بینی کرده بود و قیمتِ واقعیِ سررسید چه از
+# آب درآمد — همان دیدگاه‌هایی (Views) که در بخشِ بعد مستقیماً ورودیِ
+# Black-Litterman می‌شوند.
+
+# In[18]:
+
+
+print("قیمتِ واقعی در برابرِ پیش‌بینی‌شده در سررسید — ۸ نمونه‌ی آخرِ هر سهم (تومان)\n")
+for name in ASSET_NAMES:
+    dfp = pd.read_csv(DATA_DIR + f'price_at_maturity_predictions_{name}.csv')
+    dfp['Error_%'] = ((dfp['pred_ensemble'] - dfp['actual_price']).abs() / dfp['actual_price'] * 100).round(2)
+    sub = dfp[['date', 'actual_price', 'pred_ensemble', 'Error_%']].tail(8).copy()
+    sub['actual_price'] = sub['actual_price'].round(0).astype(int)
+    sub['pred_ensemble'] = sub['pred_ensemble'].round(0).astype(int)
+    sub = sub.rename(columns={'date': 'Date', 'actual_price': 'Actual_Price', 'pred_ensemble': 'Predicted_Price'})
+    print(f"=== {name} ===")
+    display(sub)
+
+
 # ---
 # # بخشِ ۲ — ساختِ پورتفو (Black-Litterman)
 # ---
@@ -1141,7 +1163,7 @@ print(f"  - price_at_maturity_predictions_<asset>.csv برای هر یک از {l
 # Attilio Meucci's *Risk and Asset Allocation*، ۲۰۰۵) به‌عنوانِ استانداردِ عملی
 # معرفی می‌شود — نه یک بهینه‌سازیِ آموزشیِ ساده.
 
-# In[18]:
+# In[19]:
 
 
 import warnings, os
@@ -1173,7 +1195,7 @@ print("✅ Ready")
 
 # ## ۱) بارگذاریِ قیمت‌ها (همان تعدیلِ وقایعِ شرکتیِ نوت‌بوکِ پیش‌بینی)
 
-# In[19]:
+# In[20]:
 
 
 def load_and_clean(name):
@@ -1221,7 +1243,7 @@ for name in ASSET_NAMES:
 # ساختاریافته (مضربی از ماتریسِ همانی) می‌کشد؛ ضریبِ Shrinkage به‌صورتِ خودکار و
 # بهینه از خودِ داده تخمین زده می‌شود (نه یک عددِ دلبخواهی).
 
-# In[20]:
+# In[21]:
 
 
 ret_wide = pd.DataFrame({name: np.log(df['close'] / df['close'].shift(1)) for name, df in processed.items()})
@@ -1261,7 +1283,7 @@ plt.show()
 # $\Pi = \delta \, \Sigma \, w_{mkt}$ که در آن $\delta$ ضریبِ ریسک‌گریزیِ بازار
 # است (مقدارِ استانداردِ کتاب‌های مرجع: ۲.۵).
 
-# In[21]:
+# In[22]:
 
 
 DELTA = 2.5
@@ -1287,7 +1309,7 @@ display(prior_df.style.format({'TradedValue_Weight': '{:.1%}', 'Equilibrium_Retu
 #   به $\Omega$ است — با این تفاوت که این‌جا «اطمینان» یک عددِ ساختگی نیست،
 #   بلکه مستقیماً از خطای اندازه‌گیری‌شده‌ی مدل می‌آید.
 
-# In[22]:
+# In[23]:
 
 
 rec = pd.read_csv(DATA_DIR + 'price_at_maturity_recommended_models.csv').set_index('Asset')
@@ -1317,7 +1339,7 @@ display(views_df.style.format({'View_Return_Annualized': '{:.1%}', 'View_StdDev_
 # 
 # $$\Pi_{BL} = \left[(\tau\Sigma)^{-1} + P^\top\Omega^{-1}P\right]^{-1}\left[(\tau\Sigma)^{-1}\Pi + P^\top\Omega^{-1}Q\right]$$
 
-# In[23]:
+# In[24]:
 
 
 P = np.eye(len(ASSET_NAMES))
@@ -1340,7 +1362,7 @@ print("\nمشاهده کنید که Pi_BL همیشه بینِ Equilibrium_Prior 
 # مقدمه اشاره شد (خودِ سلولِ بعدی این را با محدودیتِ آزاد نشان می‌دهد). راه‌حلِ
 # استاندارد در عمل، محدودکردنِ وزنِ هر سهم به یک بازه‌ی معقول است.
 
-# In[24]:
+# In[25]:
 
 
 def neg_sharpe(w, mu, Sigma, rf):
@@ -1389,7 +1411,7 @@ print(f"مجموعِ وزن‌ها: {w_bl.sum():.6f}")
 # واریانس، یک پورتفویِ متنوع و پایدار می‌سازد. مقایسه‌اش با Black-Litterman
 # مشخص می‌کند که آیا واردکردنِ دیدگاه‌های ML واقعاً چیزی «اضافه» می‌کند یا نه.
 
-# In[25]:
+# In[26]:
 
 
 d = corr_ann
@@ -1445,7 +1467,7 @@ for n, w in zip(ASSET_NAMES, w_hrp):
 
 # ## ۸) مرزِ کارا (Efficient Frontier) و جایگاهِ هر پورتفو
 
-# In[26]:
+# In[27]:
 
 
 def frontier_vol(target_ret, mu, Sigma, lb, ub):
@@ -1489,7 +1511,7 @@ plt.show()
 # سرمایه) از هر سهم می‌آید — طبقِ فرمولِ استانداردِ تجزیه‌ی ریسک:
 # $RC_i = w_i \cdot (\Sigma w)_i / (w^\top \Sigma w)$.
 
-# In[27]:
+# In[28]:
 
 
 def port_stats(w, mu, Sigma, rf):
@@ -1522,7 +1544,7 @@ display(risk_df.style.format({'Capital_Weight': '{:.1%}', 'Risk_Contribution': '
 # (بخشِ ۴) را وارد می‌کند، هم با استفاده از Ledoit-Wolf و محدودیتِ وزن، در برابرِ
 # مشکلِ شناخته‌شده‌ی تمرکزِ افراطیِ Markowitz محافظت‌شده است.
 
-# In[28]:
+# In[29]:
 
 
 final_df = pd.DataFrame({'Asset': ASSET_NAMES, 'Weight': w_bl}).sort_values('Weight', ascending=False)
@@ -1558,7 +1580,7 @@ plt.show()
 
 # ## ۱۲) ذخیره‌ی خروجی
 
-# In[29]:
+# In[30]:
 
 
 OUT_DIR = DATA_DIR
@@ -1632,7 +1654,7 @@ print("✅ ذخیره شد: portfolio_weights_black_litterman.csv, portfolio_met
 # - McMillan, L.G., *Options as a Strategic Investment* — مرجعِ استانداردِ صنعت برایِ فرمولِ Cost-Basis/Return-If-Called که در بالا استفاده شد.
 # - Hull, J.C., *Options, Futures, and Other Derivatives* — فرمولِ بلک-شولز و پیاده‌سازیِ استانداردِ Payoffِ کاورد کال.
 
-# In[30]:
+# In[31]:
 
 
 import warnings, os
@@ -1663,7 +1685,7 @@ print("✅ Ready")
 
 # ## ۱) بارگذاریِ قیمتِ فعلی + بازسازیِ دیدگاه‌ها (بدونِ هیچ پیش‌بینیِ جدید)
 
-# In[31]:
+# In[32]:
 
 
 def load_and_clean(name):
@@ -1729,7 +1751,7 @@ display(views_df.style.format({'S0': '{:,.0f}', 'mu_ann': '{:.1%}', 'sigma_ann_v
 # نه یک پیش‌بینیِ جدیدِ قیمت. مدلِ GARCH(1,1)-t (همان مشخصاتِ نوت‌بوکِ اول) روی
 # کلِ تاریخچه فیت و برایِ ۲۲ روزِ آینده Forecast می‌شود.
 
-# In[32]:
+# In[33]:
 
 
 for name in ASSET_NAMES:
@@ -1754,7 +1776,7 @@ for name in ASSET_NAMES:
 # و $P(S_T\ge K)$ به‌دست می‌آیند (هر سه با شبیه‌سازیِ مونت‌کارلو صحت‌سنجی شده‌اند،
 # خطای کمتر از ۰.۵٪).
 
-# In[33]:
+# In[34]:
 
 
 def black_scholes_call(S0, K, T, r, sigma):
@@ -1794,7 +1816,7 @@ print("✅ توابعِ قیمت‌گذاری/پی‌آف آماده‌اند")
 # - **Annualized Expected Return** (زیرِ دیدگاهِ فیزیکی، نه بی‌طرفِ ریسک)
 # - **Utility** (مطلوبیتِ میانگین-واریانس، معیارِ نهاییِ انتخاب)
 
-# In[34]:
+# In[35]:
 
 
 DAYCOUNT = 365.0   # روزِ تقویمی — سررسیدِ آپشن‌ها همیشه با تقویم شمرده می‌شود، نه روزِ معاملاتی
@@ -1826,7 +1848,7 @@ print(f"شبکه ساخته شد: {len(grid_df)} ترکیب ({len(ASSET_NAMES)} 
 
 # ## ۵) نقشه‌ی حرارتی: مطلوبیت به‌ازایِ هر (Strike, سررسید)
 
-# In[35]:
+# In[36]:
 
 
 fig, axes = plt.subplots(2, 3, figsize=(17, 9))
@@ -1854,7 +1876,7 @@ plt.show()
 # دیدگاه‌هایِ بسیار صعودی، فروختنِ کال (حتی دورِ از پول) هزینه‌ی فرصتِ بالایی
 # دارد.
 
-# In[36]:
+# In[37]:
 
 
 best_rows = []
@@ -1884,7 +1906,7 @@ for name in ASSET_NAMES:
 # اطمینانِ مدل (معکوسِ عدمِ‌قطعیتِ نسبی) کالیبره می‌شود: سهمی که مدل رویش
 # مطمئن‌تر بوده (RMSEِ نسبیِ کمتر)، نسبتِ پوششِ بالاتری می‌گیرد.
 
-# In[37]:
+# In[38]:
 
 
 rel_uncertainty = {name: views[name]['sigma_ann_view'] for name in ASSET_NAMES}
@@ -1912,7 +1934,7 @@ print(f"\nمجموعِ سهمِ همه‌ی نوشتن‌های کاورد کا�
 
 # ## ۸) خلاصه‌ی نهایی — چه کاری با کدام سهم انجام شود
 
-# In[38]:
+# In[39]:
 
 
 print("="*78)
@@ -1945,7 +1967,7 @@ for name in ASSET_NAMES:
 
 # ## ۱۰) ذخیره‌ی خروجی
 
-# In[39]:
+# In[40]:
 
 
 grid_df.to_csv(DATA_DIR + 'covered_call_option_grid.csv', index=False)
@@ -1989,7 +2011,7 @@ print("✅ ذخیره شد: covered_call_option_grid.csv, covered_call_final_rec
 # بازتنظیمِ روزانه) — یک شکلِ خفیفِ استفاده از اطلاعِ کلِ دوره برایِ تنظیمِ یک
 # پارامتر، نه برایِ تصمیمِ معاملاتیِ خودِ هر روز.
 
-# In[40]:
+# In[41]:
 
 
 from scipy.stats import norm as _norm
@@ -2065,7 +2087,7 @@ for name in ASSET_NAMES:
 # Max Drawdown — دقیقاً همان معیارهایی که در `RESULTS_ANALYSIS.md` برایِ
 # مقایسه‌ی CC در برابرِ BnH استفاده شده بود.
 
-# In[41]:
+# In[42]:
 
 
 def perf_metrics(returns, periods_per_year):
@@ -2111,7 +2133,7 @@ print(f"\nکاورد کال از نظرِ بازدهِ کل در {n_beat_return}
 
 # ## نمودارِ منحنیِ سرمایه: کاورد کال در برابرِ Buy & Hold
 
-# In[42]:
+# In[43]:
 
 
 fig, axes = plt.subplots(3, 2, figsize=(13, 13))
@@ -2133,7 +2155,7 @@ plt.show()
 # (چون تناوبِ بازتنظیمِ هر سهم متفاوت است) اما برایِ مقایسه‌ی «کاورد کال در
 # برابرِ فقط‌سهام‌داری در سطحِ کلِ پورتفو» کافی است.
 
-# In[43]:
+# In[44]:
 
 
 port_cc_return = (bt_summary_df['CC_TotalReturn'] * weights_df['Weight']).sum()
@@ -2172,7 +2194,7 @@ print(f"  → {'کاورد کال' if port_cc_sharpe>port_bh_sharpe else 'Buy&Ho
 
 # ## ذخیره‌ی خروجیِ بک‌تست
 
-# In[44]:
+# In[45]:
 
 
 bt_summary_df.reset_index().to_csv(DATA_DIR + 'backtest_results.csv', index=False)
