@@ -978,9 +978,29 @@ plt.tight_layout()
 plt.show()
 
 
-# ## ۱۱) مقایسه‌ی RMSE قیمت بینِ مدل‌ها (نمودارِ میله‌ای)
+# ## خلاصه: قیمتِ واقعی در برابرِ قیمتِ پیش‌بینی‌شده در سررسید
+# 
+# دقیقاً زیرِ نمودارِ بالا — همان اعداد به‌صورتِ جدول: مدلِ Ensemble در آخرین
+# روزهایِ Test چه پیش‌بینی کرده بود و قیمتِ واقعیِ سررسید چه از آب درآمد.
 
 # In[14]:
+
+
+print("قیمتِ واقعی در برابرِ پیش‌بینی‌شده در سررسید — ۸ نمونه‌ی آخرِ هر سهم (تومان)\n")
+for name in ASSET_NAMES:
+    p = predictions_store[name]
+    sub = pd.DataFrame({'Date': p['dates'], 'Actual_Price': p['actual'], 'Predicted_Price': p['pred_ensemble']})
+    sub['Error_%'] = ((sub['Predicted_Price'] - sub['Actual_Price']).abs() / sub['Actual_Price'] * 100).round(2)
+    sub['Actual_Price'] = sub['Actual_Price'].round(0).astype(int)
+    sub['Predicted_Price'] = sub['Predicted_Price'].round(0).astype(int)
+    sub = sub.tail(8)
+    print(f"=== {name} ===")
+    display(sub)
+
+
+# ## ۱۱) مقایسه‌ی RMSE قیمت بینِ مدل‌ها (نمودارِ میله‌ای)
+
+# In[15]:
 
 
 model_order = ['Naive_RW', 'Drift_RW', 'GBM_GARCH', 'Ridge', 'LightGBM', 'XGBoost',
@@ -1002,7 +1022,7 @@ plt.show()
 # چکِ سلامت: اگر فیچرهای بی‌معنی (مثلِ `dow`/`month`) بالای لیست باشند، نشانه‌ی
 # Overfitting روی نویز است.
 
-# In[15]:
+# In[16]:
 
 
 fig, axes = plt.subplots(2, 3, figsize=(16, 9))
@@ -1024,7 +1044,7 @@ plt.show()
 # زمانیِ مختلف پایدار است یا محصولِ شانسیِ یک تفکیکِ خاص. فولدها از Train+Val ساخته
 # می‌شوند و هرگز به Test دست نمی‌زنند.
 
-# In[16]:
+# In[17]:
 
 
 robustness_rows = []
@@ -1075,7 +1095,7 @@ display(robustness_df)
 
 # ## ۱۵) ذخیره‌ی خروجی‌ها
 
-# In[17]:
+# In[18]:
 
 
 OUT_DIR = os.path.join(os.getcwd(), 'data') + os.sep
@@ -1101,28 +1121,6 @@ for f in ['price_at_maturity_results.csv', 'price_at_maturity_recommended_models
           ]:
     print('  -', f)
 print(f"  - price_at_maturity_predictions_<asset>.csv برای هر یک از {len(ASSET_NAMES)} سهم")
-
-
-# ## خلاصه: قیمتِ واقعی در برابرِ قیمتِ پیش‌بینی‌شده در سررسید
-# 
-# پیش از رفتن به ساختِ پورتفو، این جدول نشان می‌دهد مدلِ Ensemble در آخرین
-# روزهایِ Test دقیقاً چه اعدادی پیش‌بینی کرده بود و قیمتِ واقعیِ سررسید چه از
-# آب درآمد — همان دیدگاه‌هایی (Views) که در بخشِ بعد مستقیماً ورودیِ
-# Black-Litterman می‌شوند.
-
-# In[18]:
-
-
-print("قیمتِ واقعی در برابرِ پیش‌بینی‌شده در سررسید — ۸ نمونه‌ی آخرِ هر سهم (تومان)\n")
-for name in ASSET_NAMES:
-    dfp = pd.read_csv(DATA_DIR + f'price_at_maturity_predictions_{name}.csv')
-    dfp['Error_%'] = ((dfp['pred_ensemble'] - dfp['actual_price']).abs() / dfp['actual_price'] * 100).round(2)
-    sub = dfp[['date', 'actual_price', 'pred_ensemble', 'Error_%']].tail(8).copy()
-    sub['actual_price'] = sub['actual_price'].round(0).astype(int)
-    sub['pred_ensemble'] = sub['pred_ensemble'].round(0).astype(int)
-    sub = sub.rename(columns={'date': 'Date', 'actual_price': 'Actual_Price', 'pred_ensemble': 'Predicted_Price'})
-    print(f"=== {name} ===")
-    display(sub)
 
 
 # ---
