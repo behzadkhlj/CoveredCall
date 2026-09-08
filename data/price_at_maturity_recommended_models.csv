@@ -1,7 +1,7 @@
 Asset,Horizon_days,Recommended_Model,Test_RMSE_price,Test_MAPE_pct,Test_DirectionalAcc,Beats_Naive_RW,Quantile80_Coverage
-Fameli,10,LightGBM,536.3,5.82,0.513,False,0.883
-Fulad,10,DeepSeq,280.1,6.8,0.47,False,0.906
-IranKhodro,10,LightGBM,287.0,7.86,0.465,False,0.833
-Khgostar,10,Ensemble,422.1,8.02,0.515,False,0.937
-Shapna,10,DeepSeq,330.0,7.43,0.495,False,0.797
-VebMellat,20,DeepSeq,199.7,8.68,0.542,False,0.876
+Fameli,10,DeepSeq,532.0,6.11,0.432,False,0.808
+Fulad,20,DeepSeq,332.9,8.74,0.526,False,0.786
+IranKhodro,10,LightGBM,284.3,7.95,0.518,False,0.776
+Khgostar,30,LightGBM,925.5,18.72,0.487,False,0.851
+Shapna,10,Naive_RW,322.9,6.96,0.003,False,0.822
+VebMellat,20,DeepSeq,181.3,10.25,0.539,False,0.766

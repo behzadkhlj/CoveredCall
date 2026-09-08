@@ -112,7 +112,7 @@ MATURITY_CANDIDATES  = [10, 15, 20, 30]   # کاندیدهای افق سررسی
 HORIZON_WF_SPLITS    = 4
 HORIZON_MIN_MARGIN   = 0.01
 VAL_FRAC             = 0.15
-TEST_FRAC            = 0.15
+TEST_FRAC            = 0.25   # افزایش‌یافته از ۰.۱۵ برای دو برابر شدنِ تقریبیِ تعدادِ دوره‌هایِ بک‌تست
 RECENCY_HALF_LIFE     = 500        # نیم‌عمر وزنِ نمایی (ردیف) ~ ۲ سالِ معاملاتی
 
 print(f"✅ Ready | assets={ASSET_NAMES} | data_dir={DATA_DIR}")
