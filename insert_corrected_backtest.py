@@ -158,14 +158,27 @@ def perf_metrics2(returns, periods_per_year):
     return dict(N=n, TotalReturn=total_return, Sharpe=sharpe)
 
 
-def bootstrap_ci(returns, periods_per_year, n_boot=N_BOOTSTRAP):
+def bootstrap_ci(returns, periods_per_year, n_boot=N_BOOTSTRAP, block_len=None):
+    # Stationary bootstrap (Politis & Romano, 1994) به‌جایِ i.i.d. resampling —
+    # بازده‌هایِ رول‌شده‌ی کاوردکال می‌توانند autocorrelation/persistence رژیمی
+    # داشته باشند؛ i.i.d. این ساختار را نادیده می‌گیرد و بازه‌یِ اطمینان را
+    # کاذب باریک می‌کند. طولِ بلوکِ میانگین با قاعده‌یِ رایجِ n^(1/3) انتخاب
+    # می‌شود (Hall, Horowitz & Jing 1995) — یک heuristic استاندارد، نه
+    # بهینه‌سازیِ رسمیِ ACF.
     returns = np.asarray(returns)
     n = len(returns)
     if n < 3:
         return dict(TotalReturn_lo=np.nan, TotalReturn_hi=np.nan, Sharpe_lo=np.nan, Sharpe_hi=np.nan)
+    if block_len is None:
+        block_len = max(2, int(round(n ** (1 / 3))))
+    p_restart = 1.0 / block_len
     trs, shs = [], []
     for _ in range(n_boot):
-        s = np.random.choice(returns, size=n, replace=True)
+        s = np.empty(n)
+        i = np.random.randint(0, n)
+        for k in range(n):
+            s[k] = returns[i]
+            i = np.random.randint(0, n) if np.random.rand() < p_restart else (i + 1) % n
         eq = np.cumprod(1 + s)
         trs.append(eq[-1] - 1)
         yrs = n / periods_per_year
@@ -526,11 +539,18 @@ new_cells.append(md(r"""
 `Aggressive_Original`، می‌بینیم که رفعِ همزمانِ همه‌ی این ایرادها اعداد را
 به سمتِ مقادیرِ به‌مراتب متواضعانه‌تر و قابلِ‌دفاع‌تر می‌برد.
 
+**لایه‌یِ دو هم در این نسخه اضافه شد:**
+- بازه‌یِ اطمینانِ Bootstrap دیگر i.i.d. نیست — از **Stationary Bootstrap**
+  (Politis & Romano, 1994) با طولِ بلوکِ `n^(1/3)` استفاده می‌کند تا
+  autocorrelation/persistence بینِ دوره‌هایِ رول‌شده را نادیده نگیرد.
+- نشتِ مرزیِ انتخابِ افق (بخشِ ۱، تورنمنتِ Horizon)، پنجره‌یِ fit‌شدنِ GARCH
+  (که قبلاً Train+Val را می‌دید، نه فقط Train)، نشتِ StandardScaler درونِ
+  GridSearchCVِ Ridge، و quantile crossing در مدل‌هایِ کوانتایل — همه در
+  `price_at_maturity_prediction.ipynb` اصلاح و کلِ Pipeline از نو اجرا شد.
+
 **آنچه هنوز اصلاح نشده (خارج از دامنه‌یِ این بازبینی):** قیمتِ واقعیِ بازارِ
-آپشن (به‌جایِ بلک-شولزِ نظری)، NAVِ روزانه‌یِ کاملِ نقد/تسویه، block bootstrap
-به‌جایِ i.i.d.، رفعِ نشتِ مرزیِ انتخابِ افق و اسکیلر در بخشِ ۱، و کنترلِ
-multiple-testing (Deflated Sharpe Ratio) — این‌ها در لایه‌هایِ بعدیِ
-اولویت‌بندی قرار دارند.
+آپشن (به‌جایِ بلک-شولزِ نظری)، NAVِ روزانه‌یِ کاملِ نقد/تسویه، و کنترلِ
+multiple-testing (Deflated Sharpe Ratio) — این‌ها لایه‌یِ سه هستند.
 
 **منابع:** Whaley (2002); Feldman & Roy (2005); Hill, Balasubramanian,
 Gregory & Tierens (2006, *FAJ*); Foltice (2022); Israelov & Nielsen (2014,

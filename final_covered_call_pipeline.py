@@ -319,9 +319,13 @@ print("✅ build_features() آماده است —",
 
 from arch import arch_model
 
-def garch_vol_feature(close, n_pretest):
+def garch_vol_feature(close, n_train_only):
+    # نکته: پارامتر باید مرزِ *فقط Train* باشد، نه Pre-test (Train+Val) —
+    # وگرنه GARCH هنگامِ برآوردِ پارامترها، بازده‌های دوره‌ی Validation را هم
+    # می‌بیند (نشتِ خفیف به Validation، حتی اگر مدلِ ML خودش Validation را
+    # ندیده باشد).
     logret_pct = (np.log(close / close.shift(1)) * 100).dropna()
-    train_part = logret_pct.iloc[:n_pretest]
+    train_part = logret_pct.iloc[:n_train_only]
     try:
         am = arch_model(train_part, vol='GARCH', p=1, q=1, dist='t', rescale=False)
         res = am.fit(disp='off', show_warning=False)
@@ -417,7 +421,8 @@ def evaluate_horizon(feat_no_target, close, h, n_pretest):
     feat = feat_no_target.copy()
     feat['target'] = target
     feat = feat.dropna()
-    feat = feat[feat.index <= close.index[n_pretest - 1]]
+    eligible_end = max(n_pretest - 1 - h, 0)   # embargo: h روزِ آخرِ پیش از مرزِ
+    feat = feat[feat.index <= close.index[eligible_end]]
     X = feat.drop(columns='target').values
     y = feat['target'].values
     folds = purged_walkforward_folds(len(feat), HORIZON_WF_SPLITS, purge=h)
@@ -516,6 +521,7 @@ import catboost as cb
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import GridSearchCV
 import optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -711,6 +717,7 @@ for name in ASSET_NAMES:
     feat_raw = build_features(df, usd_close, mkt_loo[name])
     n_all = len(df)
     n_pretest = int(n_all * (1 - TEST_FRAC))
+    n_train_only_approx = int(n_all * (1 - TEST_FRAC - VAL_FRAC))  # برایِ GARCH: تقریبیِ مرزِ فقط-Train
 
     print("افق‌ها (Skill = 1 - RMSE_model/RMSE_drift؛ بالاتر = قابل‌پیش‌بینی‌تر):")
     horizon_scores = {}
@@ -725,7 +732,7 @@ for name in ASSET_NAMES:
     print(f"  -> افقِ سررسیدِ انتخاب‌شده: H = {H} روزِ معاملاتی")
 
     target = np.log(df['close'].shift(-H) / df['close'])
-    garch_vol = garch_vol_feature(df['close'], n_pretest)
+    garch_vol = garch_vol_feature(df['close'], n_train_only_approx)
     feat = feat_raw.copy()
     feat['garch_vol'] = garch_vol
     feat['target'] = target
@@ -760,16 +767,19 @@ for name in ASSET_NAMES:
 
     cv_purged = PurgedWalkForwardCV(len(X_train), n_splits=3, purge=H)
 
-    scaler_r = StandardScaler().fit(X_train)
-    Xtr_scaled = scaler_r.transform(X_train)
-    ridge_gcv = GridSearchCV(Ridge(), {'alpha': [0.1, 1, 3, 10, 30, 100]},
+    # Pipeline(scaler, Ridge) به‌جایِ fit-کردنِ scaler روی کلِ X_train قبل از CV —
+    # این‌طوری هر foldِ purged CV اسکیلرِ خودش را فقط رویِ train-foldِ خودش
+    # fit می‌کند (رفعِ نشتِ فولدهایِ اولیه به آمارِ فولدهایِ بعدی).
+    ridge_pipe = Pipeline([('scaler', StandardScaler()), ('ridge', Ridge())])
+    ridge_gcv = GridSearchCV(ridge_pipe, {'ridge__alpha': [0.1, 1, 3, 10, 30, 100]},
                               scoring='neg_root_mean_squared_error', cv=cv_purged, n_jobs=-1)
-    ridge_gcv.fit(Xtr_scaled, y_train, sample_weight=w_train)
+    ridge_gcv.fit(X_train, y_train, ridge__sample_weight=w_train)
     ridge = ridge_gcv.best_estimator_
-    ridge.fit(Xtr_scaled, y_train, sample_weight=w_train)   # refit on full Train with the chosen alpha
-    model_preds_val['Ridge'] = ridge.predict(scaler_r.transform(X_val))
-    model_preds_test['Ridge'] = ridge.predict(scaler_r.transform(X_test))
-    print(f"  [GridSearchCV] Ridge best alpha = {ridge_gcv.best_params_['alpha']}")
+    ridge.fit(X_train, y_train, ridge__sample_weight=w_train)   # refit on full Train with the chosen alpha
+    scaler_r = ridge.named_steps['scaler']  # نگه‌داشته می‌شود چون جاهایِ دیگر به آن ارجاع می‌دهند
+    model_preds_val['Ridge'] = ridge.predict(X_val)
+    model_preds_test['Ridge'] = ridge.predict(X_test)
+    print(f"  [GridSearchCV] Ridge best alpha = {ridge_gcv.best_params_['ridge__alpha']}")
 
     best_lgb = tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=40)
     lgb_params = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1)
@@ -789,6 +799,10 @@ for name in ASSET_NAMES:
         qm = lgb.train(qp, dtr, num_boost_round=500, valid_sets=[dval], callbacks=[lgb.early_stopping(40, verbose=False)])
         q_models[q] = qm
     q_pred_test = {q: m.predict(X_test, num_iteration=m.best_iteration) for q, m in q_models.items()}
+    # اصلاحِ Quantile Crossing: q0.1/q0.5/q0.9 مستقل fit شده‌اند و ممکن است
+    # هم‌ردیف نامرتب باشند (q10>q50 مثلاً)؛ با sort ردیفی، monotonic می‌شوند.
+    _q_stack = np.sort(np.stack([q_pred_test[0.1], q_pred_test[0.5], q_pred_test[0.9]], axis=0), axis=0)
+    q_pred_test[0.1], q_pred_test[0.5], q_pred_test[0.9] = _q_stack[0], _q_stack[1], _q_stack[2]
 
     best_xgb = tune_xgb(X_train, y_train, w_train, X_val, y_val, n_trials=30)
     xgb_model = xgb.XGBRegressor(n_estimators=500, max_depth=best_xgb['max_depth'], learning_rate=best_xgb['lr'],
@@ -878,7 +892,7 @@ for name in ASSET_NAMES:
         p_train=p_train, p_val=p_val, p_test=p_test, dates_test=dates_test,
         lgb_model=lgb_model, lgb_params=lgb_params, xgb_model=xgb_model, cb_model=cb_model,
         rf_model=rf, rf_best_params=rf_gcv.best_params_,
-        ridge_model=ridge, ridge_best_alpha=ridge_gcv.best_params_['alpha'], scaler_r=scaler_r,
+        ridge_model=ridge, ridge_best_alpha=ridge_gcv.best_params_['ridge__alpha'], scaler_r=scaler_r,
         seq_net=net, seq_scaler=seq_scaler, seq_window=seq_window, seq_cfg=seq_cfg, seq_name=seq_name,
         q_models=q_models, weights=weights, recommended_model=recommended_model,
         model_preds_val=model_preds_val, model_preds_test=model_preds_test,
@@ -2363,14 +2377,27 @@ def perf_metrics2(returns, periods_per_year):
     return dict(N=n, TotalReturn=total_return, Sharpe=sharpe)
 
 
-def bootstrap_ci(returns, periods_per_year, n_boot=N_BOOTSTRAP):
+def bootstrap_ci(returns, periods_per_year, n_boot=N_BOOTSTRAP, block_len=None):
+    # Stationary bootstrap (Politis & Romano, 1994) به‌جایِ i.i.d. resampling —
+    # بازده‌هایِ رول‌شده‌ی کاوردکال می‌توانند autocorrelation/persistence رژیمی
+    # داشته باشند؛ i.i.d. این ساختار را نادیده می‌گیرد و بازه‌یِ اطمینان را
+    # کاذب باریک می‌کند. طولِ بلوکِ میانگین با قاعده‌یِ رایجِ n^(1/3) انتخاب
+    # می‌شود (Hall, Horowitz & Jing 1995) — یک heuristic استاندارد، نه
+    # بهینه‌سازیِ رسمیِ ACF.
     returns = np.asarray(returns)
     n = len(returns)
     if n < 3:
         return dict(TotalReturn_lo=np.nan, TotalReturn_hi=np.nan, Sharpe_lo=np.nan, Sharpe_hi=np.nan)
+    if block_len is None:
+        block_len = max(2, int(round(n ** (1 / 3))))
+    p_restart = 1.0 / block_len
     trs, shs = [], []
     for _ in range(n_boot):
-        s = np.random.choice(returns, size=n, replace=True)
+        s = np.empty(n)
+        i = np.random.randint(0, n)
+        for k in range(n):
+            s[k] = returns[i]
+            i = np.random.randint(0, n) if np.random.rand() < p_restart else (i + 1) % n
         eq = np.cumprod(1 + s)
         trs.append(eq[-1] - 1)
         yrs = n / periods_per_year
@@ -2734,11 +2761,18 @@ print(sp.groupby('Year')[['CC_Sharpe', 'BH_Sharpe']].mean().round(3))
 # `Aggressive_Original`، می‌بینیم که رفعِ همزمانِ همه‌ی این ایرادها اعداد را
 # به سمتِ مقادیرِ به‌مراتب متواضعانه‌تر و قابلِ‌دفاع‌تر می‌برد.
 # 
+# **لایه‌یِ دو هم در این نسخه اضافه شد:**
+# - بازه‌یِ اطمینانِ Bootstrap دیگر i.i.d. نیست — از **Stationary Bootstrap**
+#   (Politis & Romano, 1994) با طولِ بلوکِ `n^(1/3)` استفاده می‌کند تا
+#   autocorrelation/persistence بینِ دوره‌هایِ رول‌شده را نادیده نگیرد.
+# - نشتِ مرزیِ انتخابِ افق (بخشِ ۱، تورنمنتِ Horizon)، پنجره‌یِ fit‌شدنِ GARCH
+#   (که قبلاً Train+Val را می‌دید، نه فقط Train)، نشتِ StandardScaler درونِ
+#   GridSearchCVِ Ridge، و quantile crossing در مدل‌هایِ کوانتایل — همه در
+#   `price_at_maturity_prediction.ipynb` اصلاح و کلِ Pipeline از نو اجرا شد.
+# 
 # **آنچه هنوز اصلاح نشده (خارج از دامنه‌یِ این بازبینی):** قیمتِ واقعیِ بازارِ
-# آپشن (به‌جایِ بلک-شولزِ نظری)، NAVِ روزانه‌یِ کاملِ نقد/تسویه، block bootstrap
-# به‌جایِ i.i.d.، رفعِ نشتِ مرزیِ انتخابِ افق و اسکیلر در بخشِ ۱، و کنترلِ
-# multiple-testing (Deflated Sharpe Ratio) — این‌ها در لایه‌هایِ بعدیِ
-# اولویت‌بندی قرار دارند.
+# آپشن (به‌جایِ بلک-شولزِ نظری)، NAVِ روزانه‌یِ کاملِ نقد/تسویه، و کنترلِ
+# multiple-testing (Deflated Sharpe Ratio) — این‌ها لایه‌یِ سه هستند.
 # 
 # **منابع:** Whaley (2002); Feldman & Roy (2005); Hill, Balasubramanian,
 # Gregory & Tierens (2006, *FAJ*); Foltice (2022); Israelov & Nielsen (2014,
