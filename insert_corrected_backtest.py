@@ -548,14 +548,127 @@ new_cells.append(md(r"""
   GridSearchCVِ Ridge، و quantile crossing در مدل‌هایِ کوانتایل — همه در
   `price_at_maturity_prediction.ipynb` اصلاح و کلِ Pipeline از نو اجرا شد.
 
-**آنچه هنوز اصلاح نشده (خارج از دامنه‌یِ این بازبینی):** قیمتِ واقعیِ بازارِ
-آپشن (به‌جایِ بلک-شولزِ نظری)، NAVِ روزانه‌یِ کاملِ نقد/تسویه، و کنترلِ
-multiple-testing (Deflated Sharpe Ratio) — این‌ها لایه‌یِ سه هستند.
+**آنچه هنوز اصلاح نشده (فراتر از دامنه‌یِ این بازبینی، عمدتاً به‌خاطرِ نبودِ
+داده):** قیمتِ واقعیِ بازارِ آپشن (به‌جایِ بلک-شولزِ نظری)، Volatility Risk
+Premium به‌صورتِ مستقیم (چون implied volatilityِ واقعی نداریم)، و NAVِ
+روزانه‌یِ کاملِ نقد/تسویه. کنترلِ multiple-testing (Deflated Sharpe Ratio)،
+حساسیت به دامنه‌ی نوسانِ روزانه، و حساسیتِ آستانه‌یِ رویدادِ شرکتی — هر سه در
+بخشِ ۴ب-۳ (پایین‌تر) اضافه شدند.
 
 **منابع:** Whaley (2002); Feldman & Roy (2005); Hill, Balasubramanian,
 Gregory & Tierens (2006, *FAJ*); Foltice (2022); Israelov & Nielsen (2014,
 AQR); Israelov & Klein (2016); Diaz & Kwon (2019, *Journal of Asset
 Management*); مطالعه‌یِ بازارهایِ نوظهور (۲۰۲۱-۲۰۲۵).
+"""))
+
+
+new_cells.append(md(r"""
+---
+## بخشِ ۴ب-۳ — لایه‌یِ سه: کنترلِ Multiple-Testing، دامنه‌یِ نوسان، و حساسیتِ آستانه‌یِ رویدادِ شرکتی
+---
+
+### ۱) Deflated Sharpe Ratio — آیا Sharpe=۰.۷۵ می‌تواند صرفاً محصولِ جست‌وجویِ زیاد باشد؟
+
+در طولِ این پروژه ده‌ها انتخاب آزاد انجام شد (۴ کاندیدایِ افق × ۹ مدل ×
+شبکه‌یِ ۱۱تاییِ Strike × چند نسخه‌یِ متفاوتِ بک‌تست). طبقِ Bailey & López de
+Prado (2014), "The Deflated Sharpe Ratio"، وقتی از میانِ N آزمایش بهترین
+Sharpe گزارش می‌شود، حتی اگر هیچ مهارتِ واقعی‌ای در کار نباشد، بهترینِ N
+آزمایشِ تصادفی هم به‌طورِ سیستماتیک Sharpeِ مثبت نشان می‌دهد (اریبیِ انتخاب).
+DSR این اریبی را تصحیح می‌کند و می‌پرسد: «با احتسابِ N آزمایش، احتمالِ اینکه
+مهارتِ واقعی پشتِ این Sharpe باشد چقدر است؟» چون شمارشِ دقیقِ N بحث‌برانگیز
+است، آن را در یک بازه (۵ تا ۲۰۰) حساسیت‌سنجی می‌کنیم، نه یک عددِ واحد.
+"""))
+
+new_cells.append(code(r"""
+from scipy.stats import skew as _skew, kurtosis as _kurtosis, norm as _norm3
+
+def deflated_sharpe_ratio(returns, periods_per_year, n_trials, rf_ann=RISK_FREE_RATE):
+    returns = np.asarray(returns)
+    n = len(returns)
+    rf_per_period = rf_ann / periods_per_year
+    excess = returns - rf_per_period
+    sr_hat = excess.mean() / excess.std()          # Sharpeِ دوره‌ای (غیرِ سالانه‌شده)
+    g3 = _skew(excess)
+    g4 = _kurtosis(excess, fisher=False)            # کشیدگیِ پیرسون (نرمال = ۳)
+    euler_gamma = 0.5772156649015329
+    var_sr_trials = 1.0 / max(n - 1, 1)              # برآوردِ واریانسِ Sharpeِ زیرِ فرضِ صفر (تقریبِ استاندارد)
+    sr0 = np.sqrt(var_sr_trials) * ((1 - euler_gamma) * _norm3.ppf(1 - 1.0 / n_trials) +
+                                     euler_gamma * _norm3.ppf(1 - 1.0 / (n_trials * np.e)))
+    denom = np.sqrt(max(1 - g3 * sr_hat + ((g4 - 1) / 4) * sr_hat ** 2, 1e-8))
+    psr = _norm3.cdf((sr_hat - sr0) * np.sqrt(max(n - 1, 1)) / denom)
+    return dict(N=n, SR_hat_per_period=sr_hat, Skew=g3, Kurtosis=g4,
+                SR0_expected_max_under_null=sr0, DSR=psr)
+
+
+dsr_rows = []
+for n_trials_test in [5, 20, 50, 100, 200]:
+    r = deflated_sharpe_ratio(pcc_roll, periods_per_year_corrected, n_trials_test)
+    dsr_rows.append(dict(N_Trials_Assumed=n_trials_test, DSR_Confidence=r['DSR'],
+                          SR0_Hurdle=r['SR0_expected_max_under_null']))
+dsr_df = pd.DataFrame(dsr_rows)
+print("Deflated Sharpe Ratio برایِ پرتفویِ Rolling_BL_Monthly، به‌ازایِ چند فرضِ N (تعدادِ آزمایش):")
+print(dsr_df.round(4).to_string(index=False))
+print(f"\nSkewness دوره‌ای: {_skew(pcc_roll):.3f} | Kurtosis: {_kurtosis(pcc_roll, fisher=False):.3f}")
+print("\nتفسیر: DSR نزدیکِ ۱ یعنی حتی با احتسابِ جست‌وجویِ زیاد، بعید است این Sharpe کاملاً شانسی باشد؛")
+print("نزدیکِ ۰.۵ یا کمتر یعنی نمی‌توان مهارتِ واقعی را از نویزِ ناشیِ از جست‌وجویِ زیاد جدا کرد.")
+"""))
+
+new_cells.append(md(r"""
+### ۲) دامنه‌یِ نوسانِ روزانه — آیا Strikeهایِ پیشنهادی اصلاً در بازه‌یِ نگهداری قابلِ‌دسترس‌اند؟
+
+بورسِ تهران محدودیتِ دامنه‌یِ نوسانِ روزانه دارد (سهم نمی‌تواند در یک روز بیش
+از حدِ مشخصی جهش کند). این یک محدودیتِ میکرواستراکچر است که بلک-شولزِ
+استاندارد (بازارِ پیوسته و بدونِ اصطکاک) آن را نادیده می‌گیرد. عددِ دقیقِ
+مجازِ فعلی برایِ هر نماد را در این محیط نمی‌توانیم راستی‌آزمایی کنیم؛ به‌جای
+ادعای یک عددِ قطعی، حداکثرِ جابه‌جاییِ نظریِ ممکن را زیرِ **چند فرضِ محتمل**
+(۳٪، ۵٪، ۷٪ در روز) حساب می‌کنیم و می‌بینیم Strikeِ پیشنهادی برایِ هر سهم زیرِ
+کدام فرض‌ها اصلاً در بازه‌یِ ۲۱روزه قابلِ‌دسترس است.
+"""))
+
+new_cells.append(code(r"""
+price_limit_rows = []
+for name in ASSET_NAMES:
+    otm_selected = final_rec.loc[name, 'OTM_pct']
+    for daily_limit in [0.03, 0.05, 0.07]:
+        max_cum_move = (1 + daily_limit) ** ROLL_DAYS - 1
+        reachable = abs(otm_selected) <= max_cum_move
+        price_limit_rows.append(dict(Asset=name, Selected_OTM_pct=otm_selected,
+                                      Assumed_Daily_Limit=daily_limit,
+                                      Max_Cumulative_Move_in_ROLL_DAYS=max_cum_move,
+                                      Reachable=reachable))
+price_limit_df = pd.DataFrame(price_limit_rows)
+pivot = price_limit_df.pivot(index='Asset', columns='Assumed_Daily_Limit', values='Reachable')
+print("آیا Strikeِ انتخاب‌شده زیرِ هر فرضِ دامنه‌ی نوسانِ روزانه در ۲۱ روز قابلِ‌دسترس است؟")
+print(pivot)
+print("\n⚠️ اعدادِ دامنه‌ی نوسان (۳٪/۵٪/۷٪) فرضی‌اند، نه عددِ رسمیِ راستی‌آزمایی‌شده‌ی TSE برایِ این نمادها؛")
+print("   این جدول فقط حساسیت را نشان می‌دهد، نه یک اصلاحِ قطعی رویِ پرمیوم یا بک‌تست.")
+"""))
+
+new_cells.append(md(r"""
+### ۳) حساسیتِ آستانه‌یِ تشخیصِ رویدادِ شرکتی (۲۵٪ ثابت)
+
+آستانه‌ی ۲۵٪ (که در همه‌ی نوت‌بوک‌ها برایِ تشخیصِ جهش‌هایِ ناشی از رویدادِ
+شرکتی استفاده شد) یک قاعده‌یِ ساده و بدونِ تقویمِ رسمی است. اینجا نشان
+می‌دهیم تعدادِ رویدادهایِ تشخیص‌داده‌شده به این آستانه چقدر حساس است — اگر
+تعداد با تغییرِ کوچکِ آستانه به‌شدت عوض شود، یعنی این قاعده شکننده است.
+"""))
+
+new_cells.append(code(r"""
+threshold_sensitivity_rows = []
+for name in ASSET_NAMES:
+    df_raw = load_and_clean(name)
+    close_raw = df_raw['close'].astype(float).values
+    daily_chg = np.abs(np.diff(close_raw) / close_raw[:-1])
+    for thr in [0.15, 0.20, 0.25, 0.30, 0.35]:
+        n_events = int((daily_chg > thr).sum())
+        threshold_sensitivity_rows.append(dict(Asset=name, Threshold=thr, N_Detected_Events=n_events))
+threshold_sensitivity_df = pd.DataFrame(threshold_sensitivity_rows)
+pivot2 = threshold_sensitivity_df.pivot(index='Asset', columns='Threshold', values='N_Detected_Events')
+print("تعدادِ رویدادِ تشخیص‌داده‌شده به‌عنوانِ «رویدادِ شرکتی» به‌ازایِ آستانه‌هایِ مختلف:")
+print(pivot2)
+print(f"\nآستانه‌یِ فعلیِ پروژه: {CORP_ACTION_THRESHOLD:.0%}")
+print("اگر تعداد بینِ ستون‌هایِ نزدیک به هم خیلی فرق کند، یعنی نتیجه به این پارامترِ")
+print("دلخواه حساس است و باید در محدودیت‌هایِ پایان‌نامه صریح ذکر شود.")
 """))
 
 new_cells.append(md("## ذخیره‌ی خروجیِ بک‌تستِ اصلاح‌شده"))
@@ -568,9 +681,14 @@ rf_sensitivity_df.to_csv(DATA_DIR + 'backtest_rf_sensitivity.csv', index=False)
 weight_history_df.to_csv(DATA_DIR + 'backtest_rolling_bl_weight_history.csv')
 for name in ASSET_NAMES:
     rolling_results[name].to_csv(DATA_DIR + f'backtest_rolling_bl_{name}.csv')
+dsr_df.to_csv(DATA_DIR + 'backtest_deflated_sharpe.csv', index=False)
+price_limit_df.to_csv(DATA_DIR + 'backtest_price_limit_feasibility.csv', index=False)
+threshold_sensitivity_df.to_csv(DATA_DIR + 'backtest_corp_action_threshold_sensitivity.csv', index=False)
 print("ذخیره شد: backtest_corrected_results.csv, backtest_corrected_subperiods.csv, "
       "backtest_corrected_portfolio_comparison.csv, backtest_rf_sensitivity.csv, "
-      "backtest_rolling_bl_weight_history.csv, backtest_rolling_bl_<Asset>.csv")
+      "backtest_rolling_bl_weight_history.csv, backtest_rolling_bl_<Asset>.csv, "
+      "backtest_deflated_sharpe.csv, backtest_price_limit_feasibility.csv, "
+      "backtest_corp_action_threshold_sensitivity.csv")
 """))
 
 # Insert after cell 97 (the original Part 4 save cell), before cell 98 (final master conclusion)
