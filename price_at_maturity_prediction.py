@@ -418,6 +418,8 @@ print("✅ evaluate_horizon() آماده است")
 
 # ## ۶) مدل‌ها + تیونینگِ هایپرپارامتر (برای هر مدل جداگانه)
 # 
+# 🆕 **GARCH_LSTM_Hybrid**: به‌جایِ استفاده از `garch_vol` صرفاً به‌عنوانِ یک فیچرِ عادی (که همه‌ی مدل‌ها از قبل به آن دسترسی دارند)، اینجا یک ترکیبِ واقعیِ GARCH+LSTM پیاده می‌شود: هدفِ آموزشِ SeqNet نه بازدهِ خامِ H-روزه، بلکه بازدهِ **استانداردشده با نوسانِ شرطیِ GARCH** است (`y_std = y / (garch_vol * sqrt(H))`) — یعنی اثرِ خوشه‌بندیِ نوسان (heteroskedasticity) قبل از آموزش حذف می‌شود تا شبکه روی الگویِ خودِ بازده تمرکز کند، نه دامنه‌ی نوسانش. در پیش‌بینی، خروجیِ شبکه دوباره در `garch_vol*sqrt(H)` ضرب می‌شود تا به مقیاسِ بازدهِ واقعی برگردد. این دقیقاً همان معماریِ رایجِ «GARCH-LSTM hybrid» در ادبیاتِ پیش‌بینیِ قیمت است.
+# 
 # **Baselineهای مالیِ کلاسیک** (برای این‌که مدل‌های ML مجبور باشند واقعاً چیزی «اضافه»
 # کنند، نه این‌که صرفاً از یک baseline ضعیف بهتر باشند):
 # - `Naive_RW`: بدونِ تغییر (Random Walk خالص).
@@ -808,8 +810,25 @@ for name in ASSET_NAMES:
     model_preds_test['DeepSeq'] = pred_test_seq
     print(f"  [Grid Search معماری] بهترینِ DeepSeq برای {name}: {seq_name}")
 
+    # 🆕 GARCH_LSTM_Hybrid: هدفِ آموزش = بازدهِ استانداردشده با نوسانِ شرطیِ GARCH
+    # (نه بازدهِ خام مثلِ DeepSeq بالا) — رفعِ اثرِ heteroskedasticity قبل از آموزشِ LSTM.
+    garch_col_idx = feature_cols.index('garch_vol')
+    vol_scale_train = np.maximum(X_train[:, garch_col_idx], 1e-4) * np.sqrt(H)
+    vol_scale_val = np.maximum(X_val[:, garch_col_idx], 1e-4) * np.sqrt(H)
+    vol_scale_test = np.maximum(X_test[:, garch_col_idx], 1e-4) * np.sqrt(H)
+    y_train_std = y_train / vol_scale_train
+    y_val_std = y_val / vol_scale_val
+
+    net_gh, scaler_gh, window_gh, cfg_gh = tune_seqnet(X_train, y_train_std, X_val, y_val_std, window=20)
+    pred_val_gh_std = predict_seqnet(net_gh, scaler_gh, window_gh, X_train[-window_gh:], X_val)
+    Xtr_val_tail_gh = np.vstack([X_train[-window_gh:], X_val])[-window_gh:]
+    pred_test_gh_std = predict_seqnet(net_gh, scaler_gh, window_gh, Xtr_val_tail_gh, X_test)
+    model_preds_val['GARCH_LSTM_Hybrid'] = pred_val_gh_std * vol_scale_val
+    model_preds_test['GARCH_LSTM_Hybrid'] = pred_test_gh_std * vol_scale_test
+    print(f"  [Grid Search معماری] بهترینِ GARCH_LSTM_Hybrid برای {name}: {seq_label(cfg_gh)}")
+
     all_names = ['Naive_RW', 'Drift_RW', 'GBM_GARCH', 'Ridge', 'LightGBM', 'XGBoost',
-                 'CatBoost', 'RandomForest', 'DeepSeq']
+                 'CatBoost', 'RandomForest', 'DeepSeq', 'GARCH_LSTM_Hybrid']
     val_rmses = {k: np.sqrt(np.mean((model_preds_val[k] - y_val) ** 2)) for k in all_names}
     inv = {k: 1.0 / max(v, 1e-6) ** 4 for k, v in val_rmses.items()}
     tot = sum(inv.values())
@@ -967,7 +986,7 @@ plt.show()
 
 
 model_order = ['Naive_RW', 'Drift_RW', 'GBM_GARCH', 'Ridge', 'LightGBM', 'XGBoost',
-               'CatBoost', 'RandomForest', 'DeepSeq', 'Ensemble']
+               'CatBoost', 'RandomForest', 'DeepSeq', 'GARCH_LSTM_Hybrid', 'Ensemble']
 pivot_rmse = results_df.pivot_table(index='Model', columns='Asset', values='RMSE_price').reindex(model_order)
 fig, ax = plt.subplots(figsize=(12, 5))
 pivot_rmse.T.plot(kind='bar', ax=ax, width=0.85)
