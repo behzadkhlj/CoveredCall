@@ -3144,10 +3144,189 @@ print("\nانتظارِ Diaz & Kwon: با افزایشِ λ (ریسک‌گریز
 print("Avg_Moneyness_OTM باید به سمتِ صفر (ATM) نزدیک شود.")
 
 
-# ## ذخیره‌ی خروجیِ بک‌تستِ اصلاح‌شده
+# ---
+# # بخشِ ۵ب — سه اصلاحِ اولویت‌دار طبقِ Diaz & Kwon (2020)
+# ---
+# 
+# با مقایسه‌ی مقاله‌ی دومِ Diaz & Kwon («Optimization of covered calls under
+# uncertainty»، ۲۰۲۰) سه اختلافِ اولویت‌دار با کارِ ما شناسایی شد که همه بدونِ
+# نیاز به داده‌ی جدید قابلِ‌پیاده‌سازی بودند:
+# 
+# 1. **ترکیبِ چند سررسیدِ همزمان** (اینجا: ۱۰ روزه + ۲۱ روزه، به‌جایِ فقط ۲۱ روزه).
+# 2. **تابعِ مطلوبیتِ Quadratic** به‌جایِ CVaR (چارچوبِ عمومی‌ترِ مقاله‌ی ۲۰۲۰).
+# 3. **هزینه‌ی معاملاتیِ مبتنی‌بر گردش (turnover)** به‌جایِ درصدِ ثابتِ ساده.
+# 
+# این بخش نسخه‌ی جدیدی از LP (اینجا QP، چون Quadratic Utility محدبیتِ درجه‌دومی
+# اضافه می‌کند) با کتابخانه‌ی `cvxpy` می‌سازد و آن را با همان تاریخ‌هایِ
+# rebalanceِ مشترک اجرا می‌کند.
 # 
 
 # In[58]:
+
+
+import cvxpy as cp
+
+SHORT_MATURITY_DAYS = 10     # سررسیدِ کوتاه (روزِ معاملاتی)
+S_UTIL = 2.5                 # پارامترِ Quadratic Utility (McMillan: ARA=1/(s-W)≈1/(s-1))
+TURNOVER_COST = 0.01         # هزینه‌یِ هر واحدِ گردشِ پرتفو (c_z در نمادِ مقاله)
+TURNOVER_MAX = 0.60          # سقفِ گردشِ کلِ پرتفو در هر rebalance
+
+
+def simulate_two_horizon(S0_vec, mu_vec, sigma_vec, corr, T1, T2, n_scen, rng):
+    n_a = len(S0_vec)
+    L = np.linalg.cholesky(corr + 1e-8 * np.eye(n_a))
+    Z1 = rng.standard_normal((n_scen, n_a)) @ L.T
+    Z2 = rng.standard_normal((n_scen, n_a)) @ L.T
+    drift1 = (mu_vec - 0.5 * sigma_vec ** 2) * T1
+    S_T1 = S0_vec[None, :] * np.exp(drift1[None, :] + sigma_vec[None, :] * np.sqrt(T1) * Z1)
+    drift2 = (mu_vec - 0.5 * sigma_vec ** 2) * (T2 - T1)
+    S_T2 = S_T1 * np.exp(drift2[None, :] + sigma_vec[None, :] * np.sqrt(T2 - T1) * Z2)
+    return S_T1, S_T2
+
+
+def solve_multi_maturity_qp(S0_vec, mu_vec, sigma_vec, sigma_bs_vec, corr, T1, T2, otm_grid, rf,
+                             w_min, w_max, s_util, turnover_cost, turnover_max, w_prev, n_scen, rng):
+    n_a, n_k = len(S0_vec), len(otm_grid)
+    S_T1, S_T2 = simulate_two_horizon(S0_vec, mu_vec, sigma_vec, corr, T1, T2, n_scen, rng)
+
+    K_s = np.array([[S0_vec[j] * (1 + o) for o in otm_grid] for j in range(n_a)])
+    K_l = K_s.copy()
+    prem_s = np.array([[black_scholes_call(S0_vec[j], K_s[j, l], T1, rf, sigma_bs_vec[j])
+                         for l in range(n_k)] for j in range(n_a)])
+    prem_l = np.array([[black_scholes_call(S0_vec[j], K_l[j, l], T2, rf, sigma_bs_vec[j])
+                         for l in range(n_k)] for j in range(n_a)])
+
+    w = cp.Variable(n_a)
+    p_s = cp.Variable((n_a, n_k), nonneg=True)
+    p_l = cp.Variable((n_a, n_k), nonneg=True)
+    x = cp.multiply(w, 1.0 / S0_vec)
+
+    payout_s = np.maximum(S_T1[:, :, None] - K_s[None, :, :], 0.0)
+    payout_l = np.maximum(S_T2[:, :, None] - K_l[None, :, :], 0.0)
+    coef_s = prem_s[None, :, :] * np.exp(rf * T1) - payout_s
+    coef_l = prem_l[None, :, :] * np.exp(rf * T2) - payout_l
+
+    stock_term = S_T2 @ x
+    opt_s_term = cp.sum(cp.multiply(coef_s, cp.reshape(p_s, (1, n_a, n_k), order='C')), axis=(1, 2))
+    opt_l_term = cp.sum(cp.multiply(coef_l, cp.reshape(p_l, (1, n_a, n_k), order='C')), axis=(1, 2))
+    r = stock_term + opt_s_term + opt_l_term - 1.0
+    W = 1.0 + r
+
+    turnover = cp.abs(w - w_prev)
+    util = cp.sum(W) / n_scen - cp.sum(cp.square(W)) / (2 * s_util * n_scen)
+    objective = cp.Maximize(util - turnover_cost * cp.sum(turnover))
+
+    constraints = [cp.sum(w) == 1, w >= w_min, w <= w_max, cp.sum(turnover) <= turnover_max]
+    for j in range(n_a):
+        constraints.append(cp.sum(p_s[j, :]) + cp.sum(p_l[j, :]) <= x[j])
+
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver=cp.OSQP, max_iter=20000, eps_abs=1e-5, eps_rel=1e-5, verbose=False)
+    if w.value is None:
+        return None
+    return dict(status=prob.status, w=w.value, p_s=p_s.value, p_l=p_l.value,
+                K_s=K_s, K_l=K_l, prem_s=prem_s, prem_l=prem_l)
+
+
+print("موتورِ QPِ چندسررسیدی (Quadratic Utility + هزینه‌ی گردش) آماده شد.")
+
+
+# In[59]:
+
+
+qp_rng = np.random.default_rng(321)
+qp_rows = []
+qp_weight_history = []
+qp_maturity_mix = []
+qp_skipped = 0
+w_prev_qp = np.ones(len(ASSET_NAMES)) / len(ASSET_NAMES)
+
+for t in reb_dates_common:
+    hist = ret_wide_bt.loc[:t].iloc[-BL_COV_WINDOW:]
+    if len(hist) < 60:
+        qp_skipped += 1; continue
+    Sigma_t = _LedoitWolf2().fit(hist.values).covariance_ * 252
+    corr_t = Sigma_t / np.outer(np.sqrt(np.diag(Sigma_t)), np.sqrt(np.diag(Sigma_t)))
+
+    views_t = {name: rolling_view_at(name, t) for name in ASSET_NAMES}
+    if any(v is None for v in views_t.values()):
+        qp_skipped += 1; continue
+
+    S0_vec, mu_vec, sigma_vec, sigma_bs_vec = [], [], [], []
+    actual_T1, actual_T2 = [], []
+    valid = True
+    for name in ASSET_NAMES:
+        close = processed_bt[name]['close']
+        if t not in close.index:
+            valid = False; break
+        pos = close.index.get_loc(t)
+        if pos + ROLL_DAYS >= len(close):
+            valid = False; break
+        S0_vec.append(close.iloc[pos])
+        actual_T1.append(close.iloc[pos + SHORT_MATURITY_DAYS])
+        actual_T2.append(close.iloc[pos + ROLL_DAYS])
+        mu_vec.append(views_t[name]['mu_ann']); sigma_vec.append(views_t[name]['sigma_ann'])
+        h60 = close.loc[:t].pct_change().dropna().iloc[-60:]
+        sigma_bs_vec.append(h60.std() * np.sqrt(252) if len(h60) > 10 else views_t[name]['sigma_ann'])
+    if not valid:
+        qp_skipped += 1; continue
+
+    S0_vec, mu_vec, sigma_vec, sigma_bs_vec, actual_T1, actual_T2 = map(
+        np.array, (S0_vec, mu_vec, sigma_vec, sigma_bs_vec, actual_T1, actual_T2))
+    T1, T2 = SHORT_MATURITY_DAYS / TRADING_DAYS_PER_YEAR, ROLL_DAYS / TRADING_DAYS_PER_YEAR
+
+    sol = solve_multi_maturity_qp(S0_vec, mu_vec, sigma_vec, sigma_bs_vec, corr_t, T1, T2, OTM_GRID,
+                                   RISK_FREE_RATE, BL_W_MIN, BL_W_MAX, S_UTIL, TURNOVER_COST, TURNOVER_MAX,
+                                   w_prev_qp, N_SCEN, qp_rng)
+    if sol is None:
+        qp_skipped += 1; continue
+
+    x_sol = sol['w'] / S0_vec
+    realized_r = float(np.dot(x_sol, actual_T2)) - 1.0
+    for j in range(len(ASSET_NAMES)):
+        for l in range(len(OTM_GRID)):
+            payout_s_ijl = max(actual_T1[j] - sol['K_s'][j, l], 0.0)
+            realized_r += sol['p_s'][j, l] * (sol['prem_s'][j, l] * np.exp(RISK_FREE_RATE * T1) - payout_s_ijl)
+            payout_l_ijl = max(actual_T2[j] - sol['K_l'][j, l], 0.0)
+            realized_r += sol['p_l'][j, l] * (sol['prem_l'][j, l] * np.exp(RISK_FREE_RATE * T2) - payout_l_ijl)
+    turnover_realized = float(np.abs(sol['w'] - w_prev_qp).sum())
+    realized_r -= TURNOVER_COST * turnover_realized
+
+    bh_r = float(np.dot(sol['w'], actual_T2 / S0_vec - 1.0))
+
+    short_wealth = float((sol['p_s'].sum(axis=1) * S0_vec).sum())
+    long_wealth = float((sol['p_l'].sum(axis=1) * S0_vec).sum())
+
+    qp_rows.append(dict(date=t, cc_ret=realized_r, bh_ret=bh_r, year=t.year, turnover=turnover_realized,
+                         short_maturity_share=short_wealth / max(short_wealth + long_wealth, 1e-9)))
+    qp_weight_history.append(dict(date=t, **{name: sol['w'][j] for j, name in enumerate(ASSET_NAMES)}))
+    w_prev_qp = sol['w']
+
+qp_df = pd.DataFrame(qp_rows).set_index('date')
+qp_weight_history_df = pd.DataFrame(qp_weight_history).set_index('date')
+print(f"✅ بک‌تستِ QPِ چندسررسیدی اجرا شد — {len(qp_df)} دوره ({qp_skipped} رد شد).")
+print(f"میانگینِ سهمِ ارزشِ پوشش‌داده‌شده با سررسیدِ کوتاه (۱۰روزه): {qp_df['short_maturity_share'].mean():.1%}")
+print(f"میانگینِ گردشِ پرتفو در هر rebalance: {qp_df['turnover'].mean():.1%}")
+
+qp_perf = perf_metrics2(qp_df['cc_ret'], periods_per_year_corrected)
+qp_bh_perf = perf_metrics2(qp_df['bh_ret'], periods_per_year_corrected)
+qp_ci = bootstrap_ci(qp_df['cc_ret'], periods_per_year_corrected)
+print(f"\nMultiMaturity_QP_Monthly: TotalReturn={qp_perf['TotalReturn']:.1%} Sharpe={qp_perf['Sharpe']:.2f} "
+      f"(CI90: {qp_ci['TotalReturn_lo']:.1%} تا {qp_ci['TotalReturn_hi']:.1%})")
+print(f"Buy&Hold (همان وزن‌ها): TotalReturn={qp_bh_perf['TotalReturn']:.1%} Sharpe={qp_bh_perf['Sharpe']:.2f}")
+
+portfolio_compare_rows.append(dict(Variant='MultiMaturity_QP_Monthly (چندسررسیدی+Quadratic Utility+Turnover)',
+                                    TotalReturn=qp_perf['TotalReturn'], Sharpe=qp_perf['Sharpe'],
+                                    TR_CI90_lo=qp_ci['TotalReturn_lo'], TR_CI90_hi=qp_ci['TotalReturn_hi']))
+portfolio_compare_df = pd.DataFrame(portfolio_compare_rows)
+print()
+print(portfolio_compare_df.round(3).to_string(index=False))
+
+
+# ## ذخیره‌ی خروجیِ بک‌تستِ اصلاح‌شده
+# 
+
+# In[60]:
 
 
 corrected_summary_df.to_csv(DATA_DIR + 'backtest_corrected_results.csv', index=False)
@@ -3163,12 +3342,15 @@ threshold_sensitivity_df.to_csv(DATA_DIR + 'backtest_corp_action_threshold_sensi
 joint_df.to_csv(DATA_DIR + 'backtest_joint_cvar_monthly.csv')
 joint_weight_history_df.to_csv(DATA_DIR + 'backtest_joint_cvar_weight_history.csv')
 policy_df.to_csv(DATA_DIR + 'backtest_joint_cvar_structural_policy.csv', index=False)
+qp_df.to_csv(DATA_DIR + 'backtest_multimaturity_qp_monthly.csv')
+qp_weight_history_df.to_csv(DATA_DIR + 'backtest_multimaturity_qp_weight_history.csv')
 print("ذخیره شد: backtest_corrected_results.csv, backtest_corrected_subperiods.csv, "
       "backtest_corrected_portfolio_comparison.csv, backtest_rf_sensitivity.csv, "
       "backtest_rolling_bl_weight_history.csv, backtest_rolling_bl_<Asset>.csv, "
       "backtest_deflated_sharpe.csv, backtest_price_limit_feasibility.csv, "
       "backtest_corp_action_threshold_sensitivity.csv, backtest_joint_cvar_monthly.csv, "
-      "backtest_joint_cvar_weight_history.csv, backtest_joint_cvar_structural_policy.csv")
+      "backtest_joint_cvar_weight_history.csv, backtest_joint_cvar_structural_policy.csv, "
+      "backtest_multimaturity_qp_monthly.csv, backtest_multimaturity_qp_weight_history.csv")
 
 
 # ---
