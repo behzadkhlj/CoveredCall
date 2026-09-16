@@ -3323,10 +3323,110 @@ print()
 print(portfolio_compare_df.round(3).to_string(index=False))
 
 
-# ## ذخیره‌ی خروجیِ بک‌تستِ اصلاح‌شده
+# ---
+# # بخشِ ۶ — Combinatorial Purged Cross-Validation (CPCV)
+# ---
+# 
+# ## چرا این بخش لازم شد؟
+# 
+# نگرانی‌ای که از Deflated Sharpe Ratio (بخشِ ۴ب-۳) بیرون آمد این بود که Sharpe=۰.۷۵
+# از **یک** تقسیمِ تکیِ زمانی به دست آمده — یعنی نمی‌دانیم این عدد پایدار است یا
+# محصولِ همان یک برشِ خاص از تاریخ. طبقِ López de Prado (پیشرفتِ ۲۰۲۴ روی روشِ
+# اصلیِ او)، **CPCV** به‌جایِ یک برش، دوره‌هایِ Test را به چند بلوکِ زمانی تقسیم
+# می‌کند و **همه‌یِ ترکیب‌هایِ ممکنِ** انتخابِ نیمی از بلوک‌ها را می‌آزماید — به
+# این ترتیب به‌جایِ یک عددِ Sharpe، یک **توزیع** از Sharpe به دست می‌آید.
+# 
+# ⚠️ **صادقانه:** نسخه‌یِ کاملِ CPCV نیازمندِ آموزشِ دوباره‌یِ مدل‌ها روی هرکدام
+# از ده‌ها ترکیبِ ممکن است — با مقیاسِ این پروژه (بازآموزیِ ۹ مدل × ۶ سهم برایِ
+# هر ترکیب) کاملاً غیرِعملی است. در عوض، منطقِ ترکیبیِ CPCV را روی **سریِ
+# بازدهِ خارج‌از-نمونه‌یِ از‌پیش‌محاسبه‌شده‌یِ** `Rolling_BL_Monthly` (که خودش
+# Walk-Forward و بدونِ نشتی است) پیاده می‌کنیم — یعنی می‌پرسیم: «اگر فقط زیرمجموعه‌ای
+# از همین دوره‌هایِ تاریخی را می‌دیدیم، باز هم به همین جمع‌بندی می‌رسیدیم؟»
 # 
 
 # In[60]:
+
+
+from itertools import combinations as _combinations
+
+CPCV_N_BLOCKS = 8
+CPCV_K_INCLUDE = 4   # نیمی از بلوک‌ها در هر ترکیب انتخاب می‌شوند
+
+pcc_roll_arr = np.asarray(pcc_roll)
+block_edges = np.linspace(0, len(pcc_roll_arr), CPCV_N_BLOCKS + 1).astype(int)
+blocks = [pcc_roll_arr[block_edges[i]:block_edges[i + 1]] for i in range(CPCV_N_BLOCKS)]
+
+cpcv_rows = []
+for combo in _combinations(range(CPCV_N_BLOCKS), CPCV_K_INCLUDE):
+    sub_returns = np.concatenate([blocks[i] for i in combo])
+    if len(sub_returns) < 3:
+        continue
+    perf = perf_metrics2(sub_returns, periods_per_year_corrected)
+    cpcv_rows.append(dict(Combo=str(combo), N=perf['N'], TotalReturn=perf['TotalReturn'], Sharpe=perf['Sharpe']))
+
+cpcv_df = pd.DataFrame(cpcv_rows)
+frac_negative_sharpe = float((cpcv_df['Sharpe'] < 0).mean())
+frac_negative_return = float((cpcv_df['TotalReturn'] < 0).mean())
+
+print(f"تعدادِ ترکیب‌هایِ CPCV: C({CPCV_N_BLOCKS},{CPCV_K_INCLUDE}) = {len(cpcv_df)}")
+print(f"\nآماره‌هایِ توزیعِ Sharpe رویِ همه‌یِ ترکیب‌ها:")
+print(cpcv_df['Sharpe'].describe().round(3))
+print(f"\nSharpeِ تک‌عددیِ اصلی (کلِ دوره، بدونِ CPCV): {perf_metrics2(pcc_roll_arr, periods_per_year_corrected)['Sharpe']:.3f}")
+print(f"\nسهمِ ترکیب‌هایی با Sharpeِ منفی: {frac_negative_sharpe:.1%}")
+print(f"سهمِ ترکیب‌هایی با بازدهِ کلِ منفی: {frac_negative_return:.1%}")
+print("\nتفسیر: اگر این سهم بالا باشد (مثلاً >30-40%)، یعنی نتیجه‌ی مثبتِ اصلی به یک")
+print("زیرمجموعه‌ی خاص از تاریخ حساس است، نه یک الگویِ پایدار در کلِ داده.")
+
+
+# ## همان تحلیل رویِ نسخه‌یِ MultiMaturity_QP_Monthly (برایِ مقایسه)
+# 
+
+# In[61]:
+
+
+qp_ret_arr = np.asarray(qp_df['cc_ret'])
+block_edges_qp = np.linspace(0, len(qp_ret_arr), CPCV_N_BLOCKS + 1).astype(int)
+blocks_qp = [qp_ret_arr[block_edges_qp[i]:block_edges_qp[i + 1]] for i in range(CPCV_N_BLOCKS)]
+
+cpcv_qp_rows = []
+for combo in _combinations(range(CPCV_N_BLOCKS), CPCV_K_INCLUDE):
+    sub_returns = np.concatenate([blocks_qp[i] for i in combo])
+    if len(sub_returns) < 3:
+        continue
+    perf = perf_metrics2(sub_returns, periods_per_year_corrected)
+    cpcv_qp_rows.append(dict(Combo=str(combo), N=perf['N'], TotalReturn=perf['TotalReturn'], Sharpe=perf['Sharpe']))
+
+cpcv_qp_df = pd.DataFrame(cpcv_qp_rows)
+print("MultiMaturity_QP_Monthly — توزیعِ Sharpe رویِ ترکیب‌هایِ CPCV:")
+print(cpcv_qp_df['Sharpe'].describe().round(3))
+print(f"سهمِ ترکیب‌هایی با Sharpeِ منفی: {(cpcv_qp_df['Sharpe'] < 0).mean():.1%}")
+
+
+# ## جمع‌بندیِ CPCV
+# 
+
+# In[62]:
+
+
+print("="*70)
+print("جمع‌بندیِ CPCV — پایداریِ نتیجه‌ی Rolling_BL_Monthly در برابرِ زیرنمونه‌گیریِ ترکیبی")
+print("="*70)
+print(f"Sharpeِ میانگین رویِ {len(cpcv_df)} ترکیب: {cpcv_df['Sharpe'].mean():.3f} "
+      f"(انحرافِ معیار: {cpcv_df['Sharpe'].std():.3f})")
+print(f"بازه‌یِ Sharpe رویِ ترکیب‌ها: {cpcv_df['Sharpe'].min():.3f} تا {cpcv_df['Sharpe'].max():.3f}")
+print(f"سهمِ ترکیب‌هایی با نتیجه‌یِ منفی: {frac_negative_sharpe:.1%}")
+if frac_negative_sharpe > 0.30:
+    print("\n⚠️ نتیجه: بخشِ قابلِ‌توجهی از ترکیب‌هایِ ممکن Sharpeِ منفی نشان می‌دهند —")
+    print("   یعنی نتیجه‌یِ مثبتِ اصلی به انتخابِ خاصِ زیرمجموعه‌یِ تاریخی حساس است.")
+else:
+    print("\n✅ نتیجه: اکثریتِ ترکیب‌ها همچنان Sharpeِ مثبت نشان می‌دهند —")
+    print("   نشانه‌یِ نسبیِ پایداریِ الگو در زیرنمونه‌هایِ مختلف (نه اثباتِ قطعی).")
+
+
+# ## ذخیره‌ی خروجیِ بک‌تستِ اصلاح‌شده
+# 
+
+# In[63]:
 
 
 corrected_summary_df.to_csv(DATA_DIR + 'backtest_corrected_results.csv', index=False)
@@ -3344,13 +3444,16 @@ joint_weight_history_df.to_csv(DATA_DIR + 'backtest_joint_cvar_weight_history.cs
 policy_df.to_csv(DATA_DIR + 'backtest_joint_cvar_structural_policy.csv', index=False)
 qp_df.to_csv(DATA_DIR + 'backtest_multimaturity_qp_monthly.csv')
 qp_weight_history_df.to_csv(DATA_DIR + 'backtest_multimaturity_qp_weight_history.csv')
+cpcv_df.to_csv(DATA_DIR + 'backtest_cpcv_rolling_bl.csv', index=False)
+cpcv_qp_df.to_csv(DATA_DIR + 'backtest_cpcv_multimaturity_qp.csv', index=False)
 print("ذخیره شد: backtest_corrected_results.csv, backtest_corrected_subperiods.csv, "
       "backtest_corrected_portfolio_comparison.csv, backtest_rf_sensitivity.csv, "
       "backtest_rolling_bl_weight_history.csv, backtest_rolling_bl_<Asset>.csv, "
       "backtest_deflated_sharpe.csv, backtest_price_limit_feasibility.csv, "
       "backtest_corp_action_threshold_sensitivity.csv, backtest_joint_cvar_monthly.csv, "
       "backtest_joint_cvar_weight_history.csv, backtest_joint_cvar_structural_policy.csv, "
-      "backtest_multimaturity_qp_monthly.csv, backtest_multimaturity_qp_weight_history.csv")
+      "backtest_multimaturity_qp_monthly.csv, backtest_multimaturity_qp_weight_history.csv, "
+      "backtest_cpcv_rolling_bl.csv, backtest_cpcv_multimaturity_qp.csv")
 
 
 # ---
