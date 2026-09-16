@@ -671,6 +671,253 @@ print("اگر تعداد بینِ ستون‌هایِ نزدیک به هم خی�
 print("دلخواه حساس است و باید در محدودیت‌هایِ پایان‌نامه صریح ذکر شود.")
 """))
 
+
+new_cells.append(md(r"""
+---
+# بخشِ ۵ — بهینه‌سازیِ همزمانِ پرتفو و اختیار (طبقِ Diaz & Kwon, 2019)
+---
+
+## چرا این بخش لازم شد؟
+
+طبقِ Diaz & Kwon (2019, *Journal of Asset Management*)، ساختنِ کاوردکال در
+دو مرحله‌ی جدا (اول وزنِ سهم، بعد جداگانه استرایک — دقیقاً کاری که در بخش‌های
+۲و۳ کردیم) **به‌طورِ کلی بهینه نیست**. آن‌ها یک مدلِ بهینه‌سازیِ **همزمان**
+پیشنهاد می‌دهند که وزنِ هر سهم و مقدارِ فروشِ **چند استرایکِ مختلف** روی هر
+سهم را در یک مسئله‌ی واحد حل می‌کند، با CVaR به‌عنوانِ معیارِ ریسک (چون خطی
+است و سریع‌تر از واریانس/سمی‌واریانس حل می‌شود، و برایِ توزیعِ چوله‌ی
+کاوردکال مناسب‌تر است).
+
+این بخش دقیقاً همان چارچوب را — با شبیه‌سازیِ سناریوهایِ همبسته (به‌جایِ
+قیمتِ بازارِ واقعیِ اختیار، که در دسترس نیست) — پیاده می‌کند: در **هر** تاریخِ
+rebalance، یک برنامه‌ریزیِ خطی (LP) حل می‌شود که همزمان وزنِ ۶ سهم **و**
+مقدارِ فروشِ هر یک از ۱۱ استرایکِ ممکن روی هر سهم را تعیین می‌کند —
+برخلافِ بخش‌های قبل که فقط یک استرایکِ «بهینه» به‌ازایِ هر سهم انتخاب می‌شد.
+"""))
+
+new_cells.append(code(r"""
+from scipy.optimize import linprog as _linprog
+
+N_SCEN = 800
+CVAR_ALPHA = 0.90
+LAMBDA_CVAR = DELTA   # همان ضریبِ ریسک‌گریزیِ استفاده‌شده در بقیه‌ی پروژه
+
+
+def simulate_joint_terminal_prices(S0_vec, mu_vec, sigma_vec, corr, T, n_scen, rng):
+    n_a = len(S0_vec)
+    L = np.linalg.cholesky(corr + 1e-8 * np.eye(n_a))
+    Z = rng.standard_normal((n_scen, n_a)) @ L.T
+    drift = (mu_vec - 0.5 * sigma_vec ** 2) * T
+    return S0_vec[None, :] * np.exp(drift[None, :] + sigma_vec[None, :] * np.sqrt(T) * Z)
+
+
+def joint_covered_call_lp(S0_vec, mu_vec, sigma_vec, sigma_bs_vec, corr, T, otm_grid, rf,
+                           w_min, w_max, lambda_cvar, alpha, n_scen, rng):
+    n_a, n_k = len(S0_vec), len(otm_grid)
+    ST = simulate_joint_terminal_prices(S0_vec, mu_vec, sigma_vec, corr, T, n_scen, rng)
+
+    K = np.array([[S0_vec[j] * (1 + otm) for otm in otm_grid] for j in range(n_a)])
+    premium = np.array([[black_scholes_call(S0_vec[j], K[j, l], T, rf, sigma_bs_vec[j])
+                          for l in range(n_k)] for j in range(n_a)])
+
+    idx_w = np.arange(0, n_a)
+    idx_x = np.arange(n_a, 2 * n_a)
+    idx_p = np.arange(2 * n_a, 2 * n_a + n_a * n_k)
+    idx_q = 2 * n_a + n_a * n_k
+    idx_z = np.arange(idx_q + 1, idx_q + 1 + n_scen)
+    n_vars = idx_q + 1 + n_scen
+
+    def p_ix(j, l):
+        return idx_p[j * n_k + l]
+
+    payout = np.maximum(ST[:, :, None] - K[None, :, :], 0.0)
+    p_coef = premium[None, :, :] * np.exp(rf * T) - payout   # (n_scen, n_a, n_k)
+
+    c = np.zeros(n_vars)
+    c[idx_x] += -(1.0 / n_scen) * ST.sum(axis=0)
+    for j in range(n_a):
+        for l in range(n_k):
+            c[p_ix(j, l)] += -(1.0 / n_scen) * p_coef[:, j, l].sum()
+    c[idx_q] += lambda_cvar
+    c[idx_z] += lambda_cvar / (n_scen * (1 - alpha))
+
+    A_eq, b_eq = [], []
+    row = np.zeros(n_vars); row[idx_w] = 1.0
+    A_eq.append(row); b_eq.append(1.0)
+    for j in range(n_a):
+        row = np.zeros(n_vars); row[idx_w[j]] = 1.0; row[idx_x[j]] = -S0_vec[j]
+        A_eq.append(row); b_eq.append(0.0)
+
+    A_ub, b_ub = [], []
+    for j in range(n_a):
+        row = np.zeros(n_vars)
+        for l in range(n_k):
+            row[p_ix(j, l)] = 1.0
+        row[idx_x[j]] = -1.0
+        A_ub.append(row); b_ub.append(0.0)
+    for i in range(n_scen):
+        row = np.zeros(n_vars)
+        row[idx_x] = -ST[i, :]
+        for j in range(n_a):
+            for l in range(n_k):
+                row[p_ix(j, l)] = -p_coef[i, j, l]
+        row[idx_q] = -1.0
+        row[idx_z[i]] = -1.0
+        A_ub.append(row); b_ub.append(-1.0)
+
+    bounds = ([(w_min, w_max)] * n_a + [(0, None)] * n_a + [(0, None)] * (n_a * n_k) +
+               [(None, None)] + [(0, None)] * n_scen)
+
+    res = _linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub),
+                    A_eq=np.array(A_eq), b_eq=np.array(b_eq), bounds=bounds, method='highs')
+    if not res.success:
+        return None
+    w_sol = res.x[idx_w]
+    x_sol = res.x[idx_x]
+    p_sol = res.x[idx_p].reshape(n_a, n_k)
+    coverage_frac = np.divide(p_sol.sum(axis=1), x_sol, out=np.zeros(n_a), where=x_sol > 1e-12)
+    n_strikes_used = (p_sol > 1e-6).sum(axis=1)
+    return dict(w=w_sol, x=x_sol, p=p_sol, K=K, premium=premium,
+                coverage_frac=coverage_frac, n_strikes_used=n_strikes_used)
+
+
+print("موتورِ LPِ بهینه‌سازیِ همزمانِ پرتفو+اختیار (روشِ Diaz & Kwon, با سناریویِ شبیه‌سازی‌شده) آماده شد.")
+"""))
+
+new_cells.append(md(r"""
+## بک‌تستِ رولینگِ نسخه‌یِ همزمان (Joint_CVaR_Monthly)
+
+در هر تاریخِ rebalanceِ مشترک (همان تاریخ‌هایِ `Rolling_BL_Monthly`)، کوواریانسِ
+رولینگ و دیدگاهِ رولینگِ هر سهم (که در بخشِ ۴ب-۲ ساخته شد) دوباره استفاده
+می‌شوند، اما این‌بار وزنِ سهم **و** ترکیبِ استرایک‌ها با یک LPِ واحد تعیین
+می‌شوند — نه دو مرحله‌ی جدا.
+"""))
+
+new_cells.append(code(r"""
+joint_rng = np.random.default_rng(123)
+joint_rows_flat = []
+joint_weight_history = []
+joint_skipped = 0
+
+for t in reb_dates_common:
+    hist = ret_wide_bt.loc[:t].iloc[-BL_COV_WINDOW:]
+    if len(hist) < 60:
+        joint_skipped += 1; continue
+    Sigma_t = _LedoitWolf2().fit(hist.values).covariance_ * 252
+    corr_t = Sigma_t / np.outer(np.sqrt(np.diag(Sigma_t)), np.sqrt(np.diag(Sigma_t)))
+
+    views_t = {name: rolling_view_at(name, t) for name in ASSET_NAMES}
+    if any(v is None for v in views_t.values()):
+        joint_skipped += 1; continue
+
+    S0_vec, mu_vec, sigma_vec, sigma_bs_vec, actual_vec = [], [], [], [], []
+    valid = True
+    for name in ASSET_NAMES:
+        close = processed_bt[name]['close']
+        if t not in close.index:
+            valid = False; break
+        pos = close.index.get_loc(t)
+        if pos + ROLL_DAYS >= len(close):
+            valid = False; break
+        S0_vec.append(close.iloc[pos])
+        actual_vec.append(close.iloc[pos + ROLL_DAYS])
+        mu_vec.append(views_t[name]['mu_ann'])
+        sigma_vec.append(views_t[name]['sigma_ann'])
+        h60 = close.loc[:t].pct_change().dropna().iloc[-60:]
+        sigma_bs_vec.append(h60.std() * np.sqrt(252) if len(h60) > 10 else views_t[name]['sigma_ann'])
+    if not valid:
+        joint_skipped += 1; continue
+
+    S0_vec, mu_vec, sigma_vec, sigma_bs_vec, actual_vec = map(np.array, (S0_vec, mu_vec, sigma_vec, sigma_bs_vec, actual_vec))
+    T = ROLL_DAYS / TRADING_DAYS_PER_YEAR
+
+    sol = joint_covered_call_lp(S0_vec, mu_vec, sigma_vec, sigma_bs_vec, corr_t, T, OTM_GRID,
+                                 RISK_FREE_RATE, BL_W_MIN, BL_W_MAX, LAMBDA_CVAR, CVAR_ALPHA, N_SCEN, joint_rng)
+    if sol is None:
+        joint_skipped += 1; continue
+
+    realized_r = 0.0
+    for j in range(len(ASSET_NAMES)):
+        realized_r += sol['x'][j] * actual_vec[j]
+        for l in range(len(OTM_GRID)):
+            payout_ijl = max(actual_vec[j] - sol['K'][j, l], 0.0)
+            realized_r += sol['p'][j, l] * (sol['premium'][j, l] * np.exp(RISK_FREE_RATE * T) - payout_ijl)
+    realized_r -= 1.0
+    realized_r -= STOCK_TXN_COST_PCT  # هزینه‌ی معاملاتیِ ساده‌شده‌ی سهم، هر دوره
+
+    bh_r = float(np.dot(sol['w'], actual_vec / S0_vec - 1.0)) - STOCK_TXN_COST_PCT
+
+    joint_rows_flat.append(dict(date=t, cc_ret=realized_r, bh_ret=bh_r, year=t.year,
+                                 avg_coverage=float(np.average(sol['coverage_frac'], weights=sol['w'])),
+                                 avg_strikes_used=float(np.average(sol['n_strikes_used'], weights=sol['w']))))
+    joint_weight_history.append(dict(date=t, **{name: sol['w'][j] for j, name in enumerate(ASSET_NAMES)}))
+
+joint_df = pd.DataFrame(joint_rows_flat).set_index('date')
+joint_weight_history_df = pd.DataFrame(joint_weight_history).set_index('date')
+print(f"✅ بک‌تستِ Joint_CVaR_Monthly اجرا شد — {len(joint_df)} دوره ({joint_skipped} رد شد).")
+print(f"میانگینِ نسبتِ پوشش (وزن‌دار): {joint_df['avg_coverage'].mean():.1%}")
+print(f"میانگینِ تعدادِ استرایکِ همزمانِ استفاده‌شده به‌ازایِ هر سهم: {joint_df['avg_strikes_used'].mean():.2f}")
+print("(اگر این عدد > ۱ باشد، یعنی مدل واقعاً چند استرایک را همزمان روی یک سهم می‌فروشد —")
+print(" دقیقاً همان رفتاری که Diaz & Kwon به‌عنوانِ نشانه‌ی بهینگیِ همزمان گزارش کردند.)")
+
+joint_perf = perf_metrics2(joint_df['cc_ret'], periods_per_year_corrected)
+joint_bh_perf = perf_metrics2(joint_df['bh_ret'], periods_per_year_corrected)
+joint_ci = bootstrap_ci(joint_df['cc_ret'], periods_per_year_corrected)
+print(f"\nJoint_CVaR_Monthly: TotalReturn={joint_perf['TotalReturn']:.1%} Sharpe={joint_perf['Sharpe']:.2f} "
+      f"(CI90: {joint_ci['TotalReturn_lo']:.1%} تا {joint_ci['TotalReturn_hi']:.1%})")
+print(f"Buy&Hold (همان دوره‌ها، وزنِ همان LP): TotalReturn={joint_bh_perf['TotalReturn']:.1%} Sharpe={joint_bh_perf['Sharpe']:.2f}")
+
+portfolio_compare_rows.append(dict(Variant='Joint_CVaR_Monthly (بهینه‌سازیِ همزمانِ Diaz & Kwon)',
+                                    TotalReturn=joint_perf['TotalReturn'], Sharpe=joint_perf['Sharpe'],
+                                    TR_CI90_lo=joint_ci['TotalReturn_lo'], TR_CI90_hi=joint_ci['TotalReturn_hi']))
+portfolio_compare_df = pd.DataFrame(portfolio_compare_rows)
+print()
+print(portfolio_compare_df.round(3).to_string(index=False))
+"""))
+
+new_cells.append(md(r"""
+## آزمونِ «سیاستِ ساختاری» — آیا نتیجه‌ی ما هم الگویِ Diaz & Kwon را نشان می‌دهد؟
+
+پیش‌بینیِ مقاله: در ریسک‌گریزیِ بالا (λ زیاد) باید پوششِ کامل با استرایکِ
+نزدیک‌به‌پول (ATM) بهینه باشد؛ با کاهشِ ریسک‌گریزی، پوشش جزئی‌تر و استرایک
+دورتر (OTM) می‌شود. این را با تغییرِ λ در یک تاریخِ نمونه می‌آزماییم.
+"""))
+
+new_cells.append(code(r"""
+sample_date = reb_dates_common[len(reb_dates_common) // 2]
+hist_s = ret_wide_bt.loc[:sample_date].iloc[-BL_COV_WINDOW:]
+Sigma_s = _LedoitWolf2().fit(hist_s.values).covariance_ * 252
+corr_s = Sigma_s / np.outer(np.sqrt(np.diag(Sigma_s)), np.sqrt(np.diag(Sigma_s)))
+views_s = {name: rolling_view_at(name, sample_date) for name in ASSET_NAMES}
+
+S0_s, mu_s, sig_s, sigbs_s = [], [], [], []
+for name in ASSET_NAMES:
+    close = processed_bt[name]['close']
+    pos = close.index.get_loc(sample_date)
+    S0_s.append(close.iloc[pos])
+    mu_s.append(views_s[name]['mu_ann']); sig_s.append(views_s[name]['sigma_ann'])
+    h60 = close.loc[:sample_date].pct_change().dropna().iloc[-60:]
+    sigbs_s.append(h60.std() * np.sqrt(252) if len(h60) > 10 else views_s[name]['sigma_ann'])
+S0_s, mu_s, sig_s, sigbs_s = map(np.array, (S0_s, mu_s, sig_s, sigbs_s))
+T_s = ROLL_DAYS / TRADING_DAYS_PER_YEAR
+
+policy_rows = []
+for lam in [0.5, 1.0, 2.5, 5.0, 10.0, 20.0]:
+    sol = joint_covered_call_lp(S0_s, mu_s, sig_s, sigbs_s, corr_s, T_s, OTM_GRID, RISK_FREE_RATE,
+                                 BL_W_MIN, BL_W_MAX, lam, CVAR_ALPHA, N_SCEN, np.random.default_rng(7))
+    if sol is None:
+        continue
+    avg_moneyness = np.average([OTM_GRID[np.argmax(sol['p'][j])] if sol['p'][j].sum() > 1e-9 else np.nan
+                                 for j in range(len(ASSET_NAMES))],
+                                weights=sol['w'])
+    policy_rows.append(dict(Lambda_RiskAversion=lam, Avg_Coverage=np.average(sol['coverage_frac'], weights=sol['w']),
+                             Avg_Moneyness_OTM=avg_moneyness))
+policy_df = pd.DataFrame(policy_rows)
+print(f"تاریخِ نمونه: {sample_date.date()}")
+print(policy_df.round(3).to_string(index=False))
+print("\nانتظارِ Diaz & Kwon: با افزایشِ λ (ریسک‌گریزیِ بیشتر) → Avg_Coverage باید بالا برود و")
+print("Avg_Moneyness_OTM باید به سمتِ صفر (ATM) نزدیک شود.")
+"""))
+
 new_cells.append(md("## ذخیره‌ی خروجیِ بک‌تستِ اصلاح‌شده"))
 
 new_cells.append(code(r"""
@@ -684,11 +931,15 @@ for name in ASSET_NAMES:
 dsr_df.to_csv(DATA_DIR + 'backtest_deflated_sharpe.csv', index=False)
 price_limit_df.to_csv(DATA_DIR + 'backtest_price_limit_feasibility.csv', index=False)
 threshold_sensitivity_df.to_csv(DATA_DIR + 'backtest_corp_action_threshold_sensitivity.csv', index=False)
+joint_df.to_csv(DATA_DIR + 'backtest_joint_cvar_monthly.csv')
+joint_weight_history_df.to_csv(DATA_DIR + 'backtest_joint_cvar_weight_history.csv')
+policy_df.to_csv(DATA_DIR + 'backtest_joint_cvar_structural_policy.csv', index=False)
 print("ذخیره شد: backtest_corrected_results.csv, backtest_corrected_subperiods.csv, "
       "backtest_corrected_portfolio_comparison.csv, backtest_rf_sensitivity.csv, "
       "backtest_rolling_bl_weight_history.csv, backtest_rolling_bl_<Asset>.csv, "
       "backtest_deflated_sharpe.csv, backtest_price_limit_feasibility.csv, "
-      "backtest_corp_action_threshold_sensitivity.csv")
+      "backtest_corp_action_threshold_sensitivity.csv, backtest_joint_cvar_monthly.csv, "
+      "backtest_joint_cvar_weight_history.csv, backtest_joint_cvar_structural_policy.csv")
 """))
 
 # Insert after cell 97 (the original Part 4 save cell), before cell 98 (final master conclusion)
