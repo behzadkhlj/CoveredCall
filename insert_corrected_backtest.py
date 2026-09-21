@@ -1223,8 +1223,9 @@ print("ذخیره شد: backtest_corrected_results.csv, backtest_corrected_subpe
       "backtest_cpcv_rolling_bl.csv, backtest_cpcv_multimaturity_qp.csv")
 """))
 
-# Insert after cell 97 (the original Part 4 save cell), before cell 98 (final master conclusion)
-insert_at = 98
+# همیشه درست قبل از آخرین سلول (که «جمع‌بندیِ نهایی» است) درج می‌شود — نه با
+# ایندکسِ عددیِ ثابت، تا رشدِ تعدادِ سلول‌هایِ بخش‌های قبلی (مثلِ Part 1) این را خراب نکند.
+insert_at = len(nb.cells) - 1
 nb.cells = nb.cells[:insert_at] + new_cells + nb.cells[insert_at:]
 
 nbformat.write(nb, NB_PATH)

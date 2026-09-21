@@ -1288,6 +1288,186 @@ print(f"\nنمونه برای {best_asset} (بیشترین بهبودِ AUC نس
 display(sample)
 
 
+# 
+# ---
+# ## ۱۳.۹) 🆕 پیش‌بینیِ واقعی روی زنجیره‌ی آپشنِ بازار (Real Market Option Chain)
+# 
+# شش فایلِ `Zameli.xlsx / Zafla.xlsx / Zkhod.xlsx / Zastar.xlsx / Zashna.xlsx / Zamelat.xlsx`
+# زنجیره‌ی واقعیِ اختیارِ خرید (Call Option) هرکدام از ۶ سهم را از بازارِ واقعیِ بورسِ تهران
+# دربردارند (نمادِ پایه، نمادِ اختیار، تاریخِ سررسید به تقویمِ جلالی، قیمتِ اعمال، و پرمیومِ
+# واقعیِ معامله‌شده). این دقیقاً همان محدودیتی است که پیش‌تر (در مقایسه با Diaz & Kwon) به‌عنوانِ
+# «عدمِ دسترسی به داده‌ی واقعیِ بازارِ آپشن» غیرقابل‌رفع اعلام شده بود — این بخش آن را با
+# داده‌ی واقعی جبران می‌کند.
+# 
+# ⚠️ **محدودیتِ صادقانه:** تاریخِ قیمتِ سهام در دیتاستِ فعلی فقط تا **۱۶ آوریلِ ۲۰۲۵** (۲۷
+# فروردینِ ۱۴۰۴) موجود است، اما تاریخِ سررسیدِ این ۶ قرارداد همگی بعد از این بازه‌اند (از ۳
+# خردادِ ۱۴۰۴ تا ۸ مردادِ ۱۴۰۴). بنابراین **مقدارِ واقعیِ قیمت در تاریخِ سررسید در دسترس نیست** و
+# فقط پیش‌بینیِ خارج‌از-نمونه (Out-of-Sample) ارائه می‌شود — نه مقایسه‌ی خطا. به‌محضِ در دسترس
+# قرارگرفتنِ داده‌ی قیمتِ به‌روزتر، ستونِ `Actual_Price` در جدولِ زیر قابلِ تکمیل خواهد بود.
+# 
+# برای هر سهم: افقِ پیش‌بینی (`H_Trading_Days`) نه از تورنمنتِ داخلیِ بخشِ ۵، بلکه از فاصله‌ی
+# واقعیِ روزهایِ معاملاتی تا تاریخِ سررسیدِ همینِ قراردادِ واقعی محاسبه می‌شود؛ سپس یک
+# Ridge + LightGBM سبک (با همان زیرساختِ Purged CV و وزن‌دهیِ زمانیِ بخش‌های قبل) دقیقاً برای
+# همین افق دوباره آموزش می‌بیند (چون مدل‌هایِ بخشِ ۷ برایِ افقِ تورنمنت‌شده‌یِ خودشان تیون
+# شده‌اند، نه لزوماً همین افق).
+# 
+
+# In[21]:
+
+
+import jdatetime
+
+REAL_OPTION_FILES = {
+    'Fameli':     'Zameli.xlsx',
+    'Fulad':      'Zafla.xlsx',
+    'IranKhodro': 'Zkhod.xlsx',
+    'Khgostar':   'Zastar.xlsx',
+    'Shapna':     'Zashna.xlsx',
+    'VebMellat':  'Zamelat.xlsx',
+}
+REPO_DIR = os.getcwd()
+
+
+def jalali_to_gregorian_ts(jalali_str):
+    y, m, d = (int(x) for x in jalali_str.split('/'))
+    return pd.Timestamp(jdatetime.date(y, m, d).togregorian())
+
+
+real_chain = {}
+for name, fname in REAL_OPTION_FILES.items():
+    fpath = os.path.join(REPO_DIR, fname)
+    if not os.path.exists(fpath):
+        print(f"⚠️ فایلِ {fname} پیدا نشد؛ {name} از این بخش رد می‌شود.")
+        continue
+    dfc = pd.read_excel(fpath)
+    dfc.columns = [c.strip() for c in dfc.columns]
+    real_chain[name] = dfc
+
+real_forecast_rows, real_strike_rows = [], []
+
+for name, dfc in real_chain.items():
+    df = processed[name]
+    last_date = df.index.max()
+    last_close = float(df['close'].iloc[-1])
+    expiration_jalali = str(dfc['Expiration Date'].iloc[0])
+    expiration_greg = jalali_to_gregorian_ts(expiration_jalali)
+    calendar_days = (expiration_greg - last_date).days
+    if calendar_days <= 0:
+        print(f"⚠️ {name}: سررسید ({expiration_greg.date()}) قبل یا هم‌زمان با آخرین داده‌ی موجود "
+              f"({last_date.date()}) است؛ رد می‌شود.")
+        continue
+    H_target = max(1, round(calendar_days * 252.0 / 365.0))  # تبدیلِ روزِ تقویمی به روزِ معاملاتی
+
+    feat_raw = build_features(df, usd_close, mkt_loo[name])
+    n_all = len(df)
+    garch_vol = garch_vol_feature(df['close'], int(n_all * (1 - VAL_FRAC)))
+    feat_full = feat_raw.copy()
+    feat_full['garch_vol'] = garch_vol
+    feature_cols_real = list(feat_full.columns)
+
+    predict_row = feat_full.iloc[[-1]]
+    if predict_row.isna().any(axis=1).iloc[0]:
+        print(f"⚠️ {name}: فیچرهایِ آخرین روز ناقص است؛ رد می‌شود.")
+        continue
+    X_predict = predict_row[feature_cols_real].values
+
+    feat_full['target'] = np.log(df['close'].shift(-H_target) / df['close'])
+    feat_train = feat_full.dropna()
+    X_all, y_all = feat_train[feature_cols_real].values, feat_train['target'].values
+    n = len(feat_train)
+    n_val = max(int(n * VAL_FRAC), 50)
+    train_end = max(n - n_val - H_target, 1)
+    val_start = train_end + H_target
+    X_train, y_train = X_all[:train_end], y_all[:train_end]
+    X_val, y_val = X_all[val_start:], y_all[val_start:]
+    if len(X_train) < 200 or len(X_val) < 20:
+        print(f"⚠️ {name}: داده‌ی کافی برایِ Train/Val با H={H_target} روزِ معاملاتی نیست؛ رد می‌شود.")
+        continue
+    w_train = recency_weights(len(X_train))
+
+    val_rmse, val_pred_h, test_pred_h = {}, {}, {}
+    val_rmse['Naive_RW'] = np.sqrt(np.mean(y_val ** 2))
+    test_pred_h['Naive_RW'] = 0.0
+    drift = y_train.mean()
+    val_rmse['Drift_RW'] = np.sqrt(np.mean((y_val - drift) ** 2))
+    test_pred_h['Drift_RW'] = drift
+
+    ridge_pipe = Pipeline([('scaler', StandardScaler()), ('ridge', Ridge())])
+    cv_real = PurgedWalkForwardCV(len(X_train), n_splits=3, purge=H_target)
+    ridge_gcv = GridSearchCV(ridge_pipe, {'ridge__alpha': [0.1, 1, 3, 10, 30, 100]},
+                              scoring='neg_root_mean_squared_error', cv=cv_real, n_jobs=-1)
+    ridge_gcv.fit(X_train, y_train, ridge__sample_weight=w_train)
+    ridge_real = ridge_gcv.best_estimator_
+    ridge_real.fit(X_train, y_train, ridge__sample_weight=w_train)
+    val_rmse['Ridge'] = np.sqrt(np.mean((ridge_real.predict(X_val) - y_val) ** 2))
+    test_pred_h['Ridge'] = ridge_real.predict(X_predict)[0]
+
+    best_lgb = tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=20)
+    lgb_params_real = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1,
+                            learning_rate=best_lgb['lr'], num_leaves=best_lgb['num_leaves'],
+                            min_data_in_leaf=best_lgb['min_data_in_leaf'], feature_fraction=best_lgb['ff'],
+                            bagging_fraction=best_lgb['bf'], lambda_l2=best_lgb['l2'])
+    dtr = lgb.Dataset(X_train, label=y_train, weight=w_train)
+    dval = lgb.Dataset(X_val, label=y_val, reference=dtr)
+    lgb_real = lgb.train(lgb_params_real, dtr, num_boost_round=500, valid_sets=[dval],
+                          callbacks=[lgb.early_stopping(40, verbose=False)])
+    val_rmse['LightGBM'] = np.sqrt(np.mean(
+        (lgb_real.predict(X_val, num_iteration=lgb_real.best_iteration) - y_val) ** 2))
+    test_pred_h['LightGBM'] = lgb_real.predict(X_predict, num_iteration=lgb_real.best_iteration)[0]
+
+    recommended = min(val_rmse, key=val_rmse.get)
+    predicted_return = test_pred_h[recommended]
+    predicted_price = last_close * np.exp(predicted_return)
+
+    real_forecast_rows.append(dict(
+        Asset=name, Base_Symbol_FA=dfc['Base Asset Symbol'].iloc[0],
+        Expiration_Date_Jalali=expiration_jalali, Expiration_Date_Gregorian=expiration_greg.date(),
+        Last_Available_Date=last_date.date(), Calendar_Days_Ahead=calendar_days, H_Trading_Days=H_target,
+        Last_Close=last_close, Recommended_Model=recommended, Val_RMSE_logret=round(val_rmse[recommended], 4),
+        Predicted_Return_pct=round(predicted_return * 100, 2), Predicted_Price=round(predicted_price, 1),
+        Actual_Price=np.nan, Note='داده‌یِ قیمتِ واقعی تا این تاریخ در دیتاست موجود نیست',
+    ))
+
+    dfc_sorted = dfc.sort_values('Strike Price')
+    otm = dfc_sorted[dfc_sorted['Strike Price'] >= predicted_price]
+    nearest = otm.iloc[0] if len(otm) else dfc_sorted.iloc[-1]
+    strike_gap_pct = (nearest['Strike Price'] / predicted_price - 1) * 100
+    if abs(strike_gap_pct) > 50:
+        print(f"  ⚠️ {name}: فاصله‌ی نزدیک‌ترین اعتصابِ واقعی تا قیمتِ پیش‌بینی‌شده {strike_gap_pct:+.0f}% "
+              f"است — این معمولاً نشانه‌ی رویدادِ شرکتی (مثلِ افزایشِ سرمایه) در فاصله‌ی زمانیِ بین "
+              f"آخرین قیمتِ ثبت‌شده‌ی ما ({last_date.date()}) و زمانِ واقعیِ این زنجیره‌ی آپشن است، "
+              f"نه یک پیشنهادِ OTM معتبر؛ بدونِ داده‌ی قیمتِ به‌روز، این مقایسه برایِ {name} قابلِ اعتماد نیست.")
+    real_strike_rows.append(dict(
+        Asset=name, Predicted_Price=round(predicted_price, 1),
+        Nearest_OTM_Strike=nearest['Strike Price'], Option_Symbol=nearest['Call Option Symbol'],
+        Quoted_Premium=nearest['Premium'],
+        Premium_Yield_pct=round(nearest['Premium'] / last_close * 100, 2),
+        Strike_vs_Predicted_pct=round(strike_gap_pct, 1),
+        Reliable=abs(strike_gap_pct) <= 50,
+    ))
+    print(f"{name}: H={H_target} روزِ معاملاتی -> سررسیدِ واقعی {expiration_greg.date()} | "
+          f"مدلِ منتخب={recommended} | قیمتِ پیش‌بینی‌شده={predicted_price:,.0f} "
+          f"(آخرین قیمتِ موجود={last_close:,.0f})")
+
+real_forecast_df = pd.DataFrame(real_forecast_rows)
+real_strike_df = pd.DataFrame(real_strike_rows)
+real_forecast_df
+
+
+# 
+# ### پیشنهادِ اعتصاب از رویِ زنجیره‌یِ واقعیِ بازار
+# 
+# برایِ هر سهم، نزدیک‌ترین اعتصابِ OTM (یعنی اولین اعتصابی که مساوی یا بالاترِ قیمتِ
+# پیش‌بینی‌شده باشد) از میانِ اعتصاب‌هایِ **واقعاً معامله‌شده** در بازار انتخاب می‌شود و
+# پرمیومِ **واقعیِ** آن (نه پرمیومِ نظریِ Black-Scholes) گزارش می‌شود.
+# 
+
+# In[22]:
+
+
+real_strike_df
+
+
 # ## ۱۴) نتیجه‌گیریِ صادقانه و محدودیت‌ها
 # 
 # **یافته‌های اصلی:**
@@ -1342,7 +1522,7 @@ display(sample)
 
 # ## ۱۵) ذخیره‌ی خروجی‌ها
 
-# In[21]:
+# In[23]:
 
 
 OUT_DIR = os.path.join(os.getcwd(), 'data') + os.sep
@@ -1351,6 +1531,8 @@ best_model_df.to_csv(OUT_DIR + 'price_at_maturity_recommended_models.csv', index
 robustness_df.to_csv(OUT_DIR + 'price_at_maturity_walkforward_robustness.csv', index=False)
 pool_compare_df.to_csv(OUT_DIR + 'price_at_maturity_pooled_vs_single.csv', index=False)
 strike_df.to_csv(OUT_DIR + 'price_at_maturity_strike_crossing_auc.csv', index=False)
+real_forecast_df.to_csv(OUT_DIR + 'real_option_chain_forecast.csv', index=False)
+real_strike_df.to_csv(OUT_DIR + 'real_option_chain_strike_recommendation.csv', index=False)
 
 horizon_log_rows = []
 for name, art in ASSET_ARTIFACTS.items():
@@ -1367,7 +1549,8 @@ for name in ASSET_NAMES:
 print("✅ خروجی‌ها ذخیره شدند:")
 for f in ['price_at_maturity_results.csv', 'price_at_maturity_recommended_models.csv',
           'price_at_maturity_walkforward_robustness.csv', 'price_at_maturity_horizon_selection.csv',
-          'price_at_maturity_pooled_vs_single.csv', 'price_at_maturity_strike_crossing_auc.csv']:
+          'price_at_maturity_pooled_vs_single.csv', 'price_at_maturity_strike_crossing_auc.csv',
+          'real_option_chain_forecast.csv', 'real_option_chain_strike_recommendation.csv']:
     print('  -', f)
 print(f"  - price_at_maturity_predictions_<asset>.csv برای هر یک از {len(ASSET_NAMES)} سهم")
 

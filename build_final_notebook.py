@@ -10,6 +10,15 @@ opt_nb = nbf.read(REPO + 'covered_call_option_selection.ipynb', as_version=4)
 final_cells = []
 
 
+def find_md(nb, prefix):
+    '''ایندکسِ اولین سلولِ Markdown که یکی از خط‌هایش با این پیشوند شروع می‌شود —
+    به‌جایِ ایندکسِ عددیِ ثابت، تا افزودن/حذفِ سلول در نوت‌بوکِ مبدا این اسکریپت را خراب نکند.'''
+    for i, c in enumerate(nb.cells):
+        if c.cell_type == 'markdown' and any(line.strip().startswith(prefix) for line in c.source.split('\n')):
+            return i
+    raise ValueError(f"Markdown cell starting with {prefix!r} not found")
+
+
 def md(src):
     final_cells.append(nbf.v4.new_markdown_cell(src.strip('\n')))
 
@@ -59,7 +68,13 @@ md(r"""
 ---
 """)
 
-for c in pred_nb.cells[0:26]:
+idx_sec11 = find_md(pred_nb, "## ۱۱)")
+idx_sec135 = find_md(pred_nb, "## ۱۳.۵)")
+idx_sec139 = find_md(pred_nb, "## ۱۳.۹)")
+idx_sec14 = find_md(pred_nb, "## ۱۴)")
+idx_sec15 = find_md(pred_nb, "## ۱۵)")
+
+for c in pred_nb.cells[0:idx_sec11]:
     final_cells.append(copy.deepcopy(c))
 
 md(r"""
@@ -82,23 +97,32 @@ for name in ASSET_NAMES:
     display(sub)
 """)
 
-for c in pred_nb.cells[26:32]:
+# سکشن‌هایِ ۱۱ (مقایسه‌ی RMSE) تا انتهایِ ۱۳ (چکِ پایداری)
+for c in pred_nb.cells[idx_sec11:idx_sec135]:
     final_cells.append(copy.deepcopy(c))
 
-conclusions_cell = copy.deepcopy(pred_nb.cells[40])
+# سکشن‌هایِ ۱۳.۵ تا ۱۳.۸ (Pooling + طبقه‌بندیِ عبور از Strike) عمداً حذف می‌شوند —
+# نتیجه‌ی نهایی را تغییر نمی‌دهند و برایِ فشرده‌ماندنِ نسخه‌ی نهایی نگه‌داشته نمی‌شوند.
+
+# سکشنِ ۱۳.۹ (پیش‌بینیِ واقعی روی زنجیره‌ی آپشنِ بازار) — نگه داشته می‌شود، چون
+# مستقیماً از داده‌ی واقعیِ بازار استفاده می‌کند.
+for c in pred_nb.cells[idx_sec139:idx_sec14]:
+    final_cells.append(copy.deepcopy(c))
+
+conclusions_cell = copy.deepcopy(pred_nb.cells[idx_sec14])
 conclusions_cell.source = conclusions_cell.source.split("- **آزمایشِ Pooling")[0].rstrip() + "\n"
 final_cells.append(conclusions_cell)
 
-final_cells.append(copy.deepcopy(pred_nb.cells[41]))
+final_cells.append(copy.deepcopy(pred_nb.cells[idx_sec15]))
 
-save_cell = copy.deepcopy(pred_nb.cells[42])
+save_cell = copy.deepcopy(pred_nb.cells[idx_sec15 + 1])
 save_cell.source = (
     save_cell.source
     .replace("pool_compare_df.to_csv(OUT_DIR + 'price_at_maturity_pooled_vs_single.csv', index=False)\n", "")
     .replace("strike_df.to_csv(OUT_DIR + 'price_at_maturity_strike_crossing_auc.csv', index=False)\n", "")
     .replace(
-        "          'price_at_maturity_pooled_vs_single.csv', 'price_at_maturity_strike_crossing_auc.csv']:",
-        "          ]:")
+        "          'price_at_maturity_pooled_vs_single.csv', 'price_at_maturity_strike_crossing_auc.csv',\n",
+        "          ")
 )
 final_cells.append(save_cell)
 

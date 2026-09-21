@@ -1098,6 +1098,186 @@ robustness_df = pd.DataFrame(robustness_rows)
 display(robustness_df)
 
 
+# 
+# ---
+# ## ۱۳.۹) 🆕 پیش‌بینیِ واقعی روی زنجیره‌ی آپشنِ بازار (Real Market Option Chain)
+# 
+# شش فایلِ `Zameli.xlsx / Zafla.xlsx / Zkhod.xlsx / Zastar.xlsx / Zashna.xlsx / Zamelat.xlsx`
+# زنجیره‌ی واقعیِ اختیارِ خرید (Call Option) هرکدام از ۶ سهم را از بازارِ واقعیِ بورسِ تهران
+# دربردارند (نمادِ پایه، نمادِ اختیار، تاریخِ سررسید به تقویمِ جلالی، قیمتِ اعمال، و پرمیومِ
+# واقعیِ معامله‌شده). این دقیقاً همان محدودیتی است که پیش‌تر (در مقایسه با Diaz & Kwon) به‌عنوانِ
+# «عدمِ دسترسی به داده‌ی واقعیِ بازارِ آپشن» غیرقابل‌رفع اعلام شده بود — این بخش آن را با
+# داده‌ی واقعی جبران می‌کند.
+# 
+# ⚠️ **محدودیتِ صادقانه:** تاریخِ قیمتِ سهام در دیتاستِ فعلی فقط تا **۱۶ آوریلِ ۲۰۲۵** (۲۷
+# فروردینِ ۱۴۰۴) موجود است، اما تاریخِ سررسیدِ این ۶ قرارداد همگی بعد از این بازه‌اند (از ۳
+# خردادِ ۱۴۰۴ تا ۸ مردادِ ۱۴۰۴). بنابراین **مقدارِ واقعیِ قیمت در تاریخِ سررسید در دسترس نیست** و
+# فقط پیش‌بینیِ خارج‌از-نمونه (Out-of-Sample) ارائه می‌شود — نه مقایسه‌ی خطا. به‌محضِ در دسترس
+# قرارگرفتنِ داده‌ی قیمتِ به‌روزتر، ستونِ `Actual_Price` در جدولِ زیر قابلِ تکمیل خواهد بود.
+# 
+# برای هر سهم: افقِ پیش‌بینی (`H_Trading_Days`) نه از تورنمنتِ داخلیِ بخشِ ۵، بلکه از فاصله‌ی
+# واقعیِ روزهایِ معاملاتی تا تاریخِ سررسیدِ همینِ قراردادِ واقعی محاسبه می‌شود؛ سپس یک
+# Ridge + LightGBM سبک (با همان زیرساختِ Purged CV و وزن‌دهیِ زمانیِ بخش‌های قبل) دقیقاً برای
+# همین افق دوباره آموزش می‌بیند (چون مدل‌هایِ بخشِ ۷ برایِ افقِ تورنمنت‌شده‌یِ خودشان تیون
+# شده‌اند، نه لزوماً همین افق).
+# 
+
+# In[18]:
+
+
+import jdatetime
+
+REAL_OPTION_FILES = {
+    'Fameli':     'Zameli.xlsx',
+    'Fulad':      'Zafla.xlsx',
+    'IranKhodro': 'Zkhod.xlsx',
+    'Khgostar':   'Zastar.xlsx',
+    'Shapna':     'Zashna.xlsx',
+    'VebMellat':  'Zamelat.xlsx',
+}
+REPO_DIR = os.getcwd()
+
+
+def jalali_to_gregorian_ts(jalali_str):
+    y, m, d = (int(x) for x in jalali_str.split('/'))
+    return pd.Timestamp(jdatetime.date(y, m, d).togregorian())
+
+
+real_chain = {}
+for name, fname in REAL_OPTION_FILES.items():
+    fpath = os.path.join(REPO_DIR, fname)
+    if not os.path.exists(fpath):
+        print(f"⚠️ فایلِ {fname} پیدا نشد؛ {name} از این بخش رد می‌شود.")
+        continue
+    dfc = pd.read_excel(fpath)
+    dfc.columns = [c.strip() for c in dfc.columns]
+    real_chain[name] = dfc
+
+real_forecast_rows, real_strike_rows = [], []
+
+for name, dfc in real_chain.items():
+    df = processed[name]
+    last_date = df.index.max()
+    last_close = float(df['close'].iloc[-1])
+    expiration_jalali = str(dfc['Expiration Date'].iloc[0])
+    expiration_greg = jalali_to_gregorian_ts(expiration_jalali)
+    calendar_days = (expiration_greg - last_date).days
+    if calendar_days <= 0:
+        print(f"⚠️ {name}: سررسید ({expiration_greg.date()}) قبل یا هم‌زمان با آخرین داده‌ی موجود "
+              f"({last_date.date()}) است؛ رد می‌شود.")
+        continue
+    H_target = max(1, round(calendar_days * 252.0 / 365.0))  # تبدیلِ روزِ تقویمی به روزِ معاملاتی
+
+    feat_raw = build_features(df, usd_close, mkt_loo[name])
+    n_all = len(df)
+    garch_vol = garch_vol_feature(df['close'], int(n_all * (1 - VAL_FRAC)))
+    feat_full = feat_raw.copy()
+    feat_full['garch_vol'] = garch_vol
+    feature_cols_real = list(feat_full.columns)
+
+    predict_row = feat_full.iloc[[-1]]
+    if predict_row.isna().any(axis=1).iloc[0]:
+        print(f"⚠️ {name}: فیچرهایِ آخرین روز ناقص است؛ رد می‌شود.")
+        continue
+    X_predict = predict_row[feature_cols_real].values
+
+    feat_full['target'] = np.log(df['close'].shift(-H_target) / df['close'])
+    feat_train = feat_full.dropna()
+    X_all, y_all = feat_train[feature_cols_real].values, feat_train['target'].values
+    n = len(feat_train)
+    n_val = max(int(n * VAL_FRAC), 50)
+    train_end = max(n - n_val - H_target, 1)
+    val_start = train_end + H_target
+    X_train, y_train = X_all[:train_end], y_all[:train_end]
+    X_val, y_val = X_all[val_start:], y_all[val_start:]
+    if len(X_train) < 200 or len(X_val) < 20:
+        print(f"⚠️ {name}: داده‌ی کافی برایِ Train/Val با H={H_target} روزِ معاملاتی نیست؛ رد می‌شود.")
+        continue
+    w_train = recency_weights(len(X_train))
+
+    val_rmse, val_pred_h, test_pred_h = {}, {}, {}
+    val_rmse['Naive_RW'] = np.sqrt(np.mean(y_val ** 2))
+    test_pred_h['Naive_RW'] = 0.0
+    drift = y_train.mean()
+    val_rmse['Drift_RW'] = np.sqrt(np.mean((y_val - drift) ** 2))
+    test_pred_h['Drift_RW'] = drift
+
+    ridge_pipe = Pipeline([('scaler', StandardScaler()), ('ridge', Ridge())])
+    cv_real = PurgedWalkForwardCV(len(X_train), n_splits=3, purge=H_target)
+    ridge_gcv = GridSearchCV(ridge_pipe, {'ridge__alpha': [0.1, 1, 3, 10, 30, 100]},
+                              scoring='neg_root_mean_squared_error', cv=cv_real, n_jobs=-1)
+    ridge_gcv.fit(X_train, y_train, ridge__sample_weight=w_train)
+    ridge_real = ridge_gcv.best_estimator_
+    ridge_real.fit(X_train, y_train, ridge__sample_weight=w_train)
+    val_rmse['Ridge'] = np.sqrt(np.mean((ridge_real.predict(X_val) - y_val) ** 2))
+    test_pred_h['Ridge'] = ridge_real.predict(X_predict)[0]
+
+    best_lgb = tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=20)
+    lgb_params_real = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1,
+                            learning_rate=best_lgb['lr'], num_leaves=best_lgb['num_leaves'],
+                            min_data_in_leaf=best_lgb['min_data_in_leaf'], feature_fraction=best_lgb['ff'],
+                            bagging_fraction=best_lgb['bf'], lambda_l2=best_lgb['l2'])
+    dtr = lgb.Dataset(X_train, label=y_train, weight=w_train)
+    dval = lgb.Dataset(X_val, label=y_val, reference=dtr)
+    lgb_real = lgb.train(lgb_params_real, dtr, num_boost_round=500, valid_sets=[dval],
+                          callbacks=[lgb.early_stopping(40, verbose=False)])
+    val_rmse['LightGBM'] = np.sqrt(np.mean(
+        (lgb_real.predict(X_val, num_iteration=lgb_real.best_iteration) - y_val) ** 2))
+    test_pred_h['LightGBM'] = lgb_real.predict(X_predict, num_iteration=lgb_real.best_iteration)[0]
+
+    recommended = min(val_rmse, key=val_rmse.get)
+    predicted_return = test_pred_h[recommended]
+    predicted_price = last_close * np.exp(predicted_return)
+
+    real_forecast_rows.append(dict(
+        Asset=name, Base_Symbol_FA=dfc['Base Asset Symbol'].iloc[0],
+        Expiration_Date_Jalali=expiration_jalali, Expiration_Date_Gregorian=expiration_greg.date(),
+        Last_Available_Date=last_date.date(), Calendar_Days_Ahead=calendar_days, H_Trading_Days=H_target,
+        Last_Close=last_close, Recommended_Model=recommended, Val_RMSE_logret=round(val_rmse[recommended], 4),
+        Predicted_Return_pct=round(predicted_return * 100, 2), Predicted_Price=round(predicted_price, 1),
+        Actual_Price=np.nan, Note='داده‌یِ قیمتِ واقعی تا این تاریخ در دیتاست موجود نیست',
+    ))
+
+    dfc_sorted = dfc.sort_values('Strike Price')
+    otm = dfc_sorted[dfc_sorted['Strike Price'] >= predicted_price]
+    nearest = otm.iloc[0] if len(otm) else dfc_sorted.iloc[-1]
+    strike_gap_pct = (nearest['Strike Price'] / predicted_price - 1) * 100
+    if abs(strike_gap_pct) > 50:
+        print(f"  ⚠️ {name}: فاصله‌ی نزدیک‌ترین اعتصابِ واقعی تا قیمتِ پیش‌بینی‌شده {strike_gap_pct:+.0f}% "
+              f"است — این معمولاً نشانه‌ی رویدادِ شرکتی (مثلِ افزایشِ سرمایه) در فاصله‌ی زمانیِ بین "
+              f"آخرین قیمتِ ثبت‌شده‌ی ما ({last_date.date()}) و زمانِ واقعیِ این زنجیره‌ی آپشن است، "
+              f"نه یک پیشنهادِ OTM معتبر؛ بدونِ داده‌ی قیمتِ به‌روز، این مقایسه برایِ {name} قابلِ اعتماد نیست.")
+    real_strike_rows.append(dict(
+        Asset=name, Predicted_Price=round(predicted_price, 1),
+        Nearest_OTM_Strike=nearest['Strike Price'], Option_Symbol=nearest['Call Option Symbol'],
+        Quoted_Premium=nearest['Premium'],
+        Premium_Yield_pct=round(nearest['Premium'] / last_close * 100, 2),
+        Strike_vs_Predicted_pct=round(strike_gap_pct, 1),
+        Reliable=abs(strike_gap_pct) <= 50,
+    ))
+    print(f"{name}: H={H_target} روزِ معاملاتی -> سررسیدِ واقعی {expiration_greg.date()} | "
+          f"مدلِ منتخب={recommended} | قیمتِ پیش‌بینی‌شده={predicted_price:,.0f} "
+          f"(آخرین قیمتِ موجود={last_close:,.0f})")
+
+real_forecast_df = pd.DataFrame(real_forecast_rows)
+real_strike_df = pd.DataFrame(real_strike_rows)
+real_forecast_df
+
+
+# 
+# ### پیشنهادِ اعتصاب از رویِ زنجیره‌یِ واقعیِ بازار
+# 
+# برایِ هر سهم، نزدیک‌ترین اعتصابِ OTM (یعنی اولین اعتصابی که مساوی یا بالاترِ قیمتِ
+# پیش‌بینی‌شده باشد) از میانِ اعتصاب‌هایِ **واقعاً معامله‌شده** در بازار انتخاب می‌شود و
+# پرمیومِ **واقعیِ** آن (نه پرمیومِ نظریِ Black-Scholes) گزارش می‌شود.
+# 
+
+# In[19]:
+
+
+real_strike_df
+
+
 # ## ۱۴) نتیجه‌گیریِ صادقانه و محدودیت‌ها
 # 
 # **یافته‌های اصلی:**
@@ -1128,13 +1308,15 @@ display(robustness_df)
 
 # ## ۱۵) ذخیره‌ی خروجی‌ها
 
-# In[18]:
+# In[20]:
 
 
 OUT_DIR = os.path.join(os.getcwd(), 'data') + os.sep
 results_df.to_csv(OUT_DIR + 'price_at_maturity_results.csv', index=False)
 best_model_df.to_csv(OUT_DIR + 'price_at_maturity_recommended_models.csv', index=False)
 robustness_df.to_csv(OUT_DIR + 'price_at_maturity_walkforward_robustness.csv', index=False)
+real_forecast_df.to_csv(OUT_DIR + 'real_option_chain_forecast.csv', index=False)
+real_strike_df.to_csv(OUT_DIR + 'real_option_chain_strike_recommendation.csv', index=False)
 
 horizon_log_rows = []
 for name, art in ASSET_ARTIFACTS.items():
@@ -1151,7 +1333,7 @@ for name in ASSET_NAMES:
 print("✅ خروجی‌ها ذخیره شدند:")
 for f in ['price_at_maturity_results.csv', 'price_at_maturity_recommended_models.csv',
           'price_at_maturity_walkforward_robustness.csv', 'price_at_maturity_horizon_selection.csv',
-          ]:
+                    'real_option_chain_forecast.csv', 'real_option_chain_strike_recommendation.csv']:
     print('  -', f)
 print(f"  - price_at_maturity_predictions_<asset>.csv برای هر یک از {len(ASSET_NAMES)} سهم")
 
@@ -1194,7 +1376,7 @@ print(f"  - price_at_maturity_predictions_<asset>.csv برای هر یک از {l
 # Attilio Meucci's *Risk and Asset Allocation*، ۲۰۰۵) به‌عنوانِ استانداردِ عملی
 # معرفی می‌شود — نه یک بهینه‌سازیِ آموزشیِ ساده.
 
-# In[19]:
+# In[21]:
 
 
 import warnings, os
@@ -1226,7 +1408,7 @@ print("✅ Ready")
 
 # ## ۱) بارگذاریِ قیمت‌ها (همان تعدیلِ وقایعِ شرکتیِ نوت‌بوکِ پیش‌بینی)
 
-# In[20]:
+# In[22]:
 
 
 def load_and_clean(name):
@@ -1274,7 +1456,7 @@ for name in ASSET_NAMES:
 # ساختاریافته (مضربی از ماتریسِ همانی) می‌کشد؛ ضریبِ Shrinkage به‌صورتِ خودکار و
 # بهینه از خودِ داده تخمین زده می‌شود (نه یک عددِ دلبخواهی).
 
-# In[21]:
+# In[23]:
 
 
 ret_wide = pd.DataFrame({name: np.log(df['close'] / df['close'].shift(1)) for name, df in processed.items()})
@@ -1314,7 +1496,7 @@ plt.show()
 # $\Pi = \delta \, \Sigma \, w_{mkt}$ که در آن $\delta$ ضریبِ ریسک‌گریزیِ بازار
 # است (مقدارِ استانداردِ کتاب‌های مرجع: ۲.۵).
 
-# In[22]:
+# In[24]:
 
 
 DELTA = 2.5
@@ -1340,7 +1522,7 @@ display(prior_df.style.format({'TradedValue_Weight': '{:.1%}', 'Equilibrium_Retu
 #   به $\Omega$ است — با این تفاوت که این‌جا «اطمینان» یک عددِ ساختگی نیست،
 #   بلکه مستقیماً از خطای اندازه‌گیری‌شده‌ی مدل می‌آید.
 
-# In[23]:
+# In[25]:
 
 
 rec = pd.read_csv(DATA_DIR + 'price_at_maturity_recommended_models.csv').set_index('Asset')
@@ -1370,7 +1552,7 @@ display(views_df.style.format({'View_Return_Annualized': '{:.1%}', 'View_StdDev_
 # 
 # $$\Pi_{BL} = \left[(\tau\Sigma)^{-1} + P^\top\Omega^{-1}P\right]^{-1}\left[(\tau\Sigma)^{-1}\Pi + P^\top\Omega^{-1}Q\right]$$
 
-# In[24]:
+# In[26]:
 
 
 P = np.eye(len(ASSET_NAMES))
@@ -1393,7 +1575,7 @@ print("\nمشاهده کنید که Pi_BL همیشه بینِ Equilibrium_Prior 
 # مقدمه اشاره شد (خودِ سلولِ بعدی این را با محدودیتِ آزاد نشان می‌دهد). راه‌حلِ
 # استاندارد در عمل، محدودکردنِ وزنِ هر سهم به یک بازه‌ی معقول است.
 
-# In[25]:
+# In[27]:
 
 
 def neg_sharpe(w, mu, Sigma, rf):
@@ -1442,7 +1624,7 @@ print(f"مجموعِ وزن‌ها: {w_bl.sum():.6f}")
 # واریانس، یک پورتفویِ متنوع و پایدار می‌سازد. مقایسه‌اش با Black-Litterman
 # مشخص می‌کند که آیا واردکردنِ دیدگاه‌های ML واقعاً چیزی «اضافه» می‌کند یا نه.
 
-# In[26]:
+# In[28]:
 
 
 d = corr_ann
@@ -1498,7 +1680,7 @@ for n, w in zip(ASSET_NAMES, w_hrp):
 
 # ## ۸) مرزِ کارا (Efficient Frontier) و جایگاهِ هر پورتفو
 
-# In[27]:
+# In[29]:
 
 
 def frontier_vol(target_ret, mu, Sigma, lb, ub):
@@ -1542,7 +1724,7 @@ plt.show()
 # سرمایه) از هر سهم می‌آید — طبقِ فرمولِ استانداردِ تجزیه‌ی ریسک:
 # $RC_i = w_i \cdot (\Sigma w)_i / (w^\top \Sigma w)$.
 
-# In[28]:
+# In[30]:
 
 
 def port_stats(w, mu, Sigma, rf):
@@ -1575,7 +1757,7 @@ display(risk_df.style.format({'Capital_Weight': '{:.1%}', 'Risk_Contribution': '
 # (بخشِ ۴) را وارد می‌کند، هم با استفاده از Ledoit-Wolf و محدودیتِ وزن، در برابرِ
 # مشکلِ شناخته‌شده‌ی تمرکزِ افراطیِ Markowitz محافظت‌شده است.
 
-# In[29]:
+# In[31]:
 
 
 final_df = pd.DataFrame({'Asset': ASSET_NAMES, 'Weight': w_bl}).sort_values('Weight', ascending=False)
@@ -1611,7 +1793,7 @@ plt.show()
 
 # ## ۱۲) ذخیره‌ی خروجی
 
-# In[30]:
+# In[32]:
 
 
 OUT_DIR = DATA_DIR
@@ -1685,7 +1867,7 @@ print("✅ ذخیره شد: portfolio_weights_black_litterman.csv, portfolio_met
 # - McMillan, L.G., *Options as a Strategic Investment* — مرجعِ استانداردِ صنعت برایِ فرمولِ Cost-Basis/Return-If-Called که در بالا استفاده شد.
 # - Hull, J.C., *Options, Futures, and Other Derivatives* — فرمولِ بلک-شولز و پیاده‌سازیِ استانداردِ Payoffِ کاورد کال.
 
-# In[31]:
+# In[33]:
 
 
 import warnings, os
@@ -1716,7 +1898,7 @@ print("✅ Ready")
 
 # ## ۱) بارگذاریِ قیمتِ فعلی + بازسازیِ دیدگاه‌ها (بدونِ هیچ پیش‌بینیِ جدید)
 
-# In[32]:
+# In[34]:
 
 
 def load_and_clean(name):
@@ -1782,7 +1964,7 @@ display(views_df.style.format({'S0': '{:,.0f}', 'mu_ann': '{:.1%}', 'sigma_ann_v
 # نه یک پیش‌بینیِ جدیدِ قیمت. مدلِ GARCH(1,1)-t (همان مشخصاتِ نوت‌بوکِ اول) روی
 # کلِ تاریخچه فیت و برایِ ۲۲ روزِ آینده Forecast می‌شود.
 
-# In[33]:
+# In[35]:
 
 
 for name in ASSET_NAMES:
@@ -1807,7 +1989,7 @@ for name in ASSET_NAMES:
 # و $P(S_T\ge K)$ به‌دست می‌آیند (هر سه با شبیه‌سازیِ مونت‌کارلو صحت‌سنجی شده‌اند،
 # خطای کمتر از ۰.۵٪).
 
-# In[34]:
+# In[36]:
 
 
 def black_scholes_call(S0, K, T, r, sigma):
@@ -1847,7 +2029,7 @@ print("✅ توابعِ قیمت‌گذاری/پی‌آف آماده‌اند")
 # - **Annualized Expected Return** (زیرِ دیدگاهِ فیزیکی، نه بی‌طرفِ ریسک)
 # - **Utility** (مطلوبیتِ میانگین-واریانس، معیارِ نهاییِ انتخاب)
 
-# In[35]:
+# In[37]:
 
 
 DAYCOUNT = 365.0   # روزِ تقویمی — سررسیدِ آپشن‌ها همیشه با تقویم شمرده می‌شود، نه روزِ معاملاتی
@@ -1879,7 +2061,7 @@ print(f"شبکه ساخته شد: {len(grid_df)} ترکیب ({len(ASSET_NAMES)} 
 
 # ## ۵) نقشه‌ی حرارتی: مطلوبیت به‌ازایِ هر (Strike, سررسید)
 
-# In[36]:
+# In[38]:
 
 
 fig, axes = plt.subplots(2, 3, figsize=(17, 9))
@@ -1907,7 +2089,7 @@ plt.show()
 # دیدگاه‌هایِ بسیار صعودی، فروختنِ کال (حتی دورِ از پول) هزینه‌ی فرصتِ بالایی
 # دارد.
 
-# In[37]:
+# In[39]:
 
 
 best_rows = []
@@ -1937,7 +2119,7 @@ for name in ASSET_NAMES:
 # اطمینانِ مدل (معکوسِ عدمِ‌قطعیتِ نسبی) کالیبره می‌شود: سهمی که مدل رویش
 # مطمئن‌تر بوده (RMSEِ نسبیِ کمتر)، نسبتِ پوششِ بالاتری می‌گیرد.
 
-# In[38]:
+# In[40]:
 
 
 rel_uncertainty = {name: views[name]['sigma_ann_view'] for name in ASSET_NAMES}
@@ -1965,7 +2147,7 @@ print(f"\nمجموعِ سهمِ همه‌ی نوشتن‌های کاورد کا�
 
 # ## ۸) خلاصه‌ی نهایی — چه کاری با کدام سهم انجام شود
 
-# In[39]:
+# In[41]:
 
 
 print("="*78)
@@ -1998,7 +2180,7 @@ for name in ASSET_NAMES:
 
 # ## ۱۰) ذخیره‌ی خروجی
 
-# In[40]:
+# In[42]:
 
 
 grid_df.to_csv(DATA_DIR + 'covered_call_option_grid.csv', index=False)
@@ -2051,7 +2233,7 @@ print("✅ ذخیره شد: covered_call_option_grid.csv, covered_call_final_rec
 # بخشِ ۴ب یک نسخه‌ی کاملاً رولینگ (Rolling Black-Litterman) می‌سازد که این
 # مشکل را حل می‌کند.
 
-# In[41]:
+# In[43]:
 
 
 from scipy.stats import norm as _norm
@@ -2132,7 +2314,7 @@ for name in ASSET_NAMES:
 # Max Drawdown — دقیقاً همان معیارهایی که در `RESULTS_ANALYSIS.md` برایِ
 # مقایسه‌ی CC در برابرِ BnH استفاده شده بود.
 
-# In[42]:
+# In[44]:
 
 
 def perf_metrics(returns, periods_per_year):
@@ -2178,7 +2360,7 @@ print(f"\nکاورد کال از نظرِ بازدهِ کل در {n_beat_return}
 
 # ## نمودارِ منحنیِ سرمایه: کاورد کال در برابرِ Buy & Hold
 
-# In[43]:
+# In[45]:
 
 
 fig, axes = plt.subplots(3, 2, figsize=(13, 13))
@@ -2200,7 +2382,7 @@ plt.show()
 # (چون تناوبِ بازتنظیمِ هر سهم متفاوت است) اما برایِ مقایسه‌ی «کاورد کال در
 # برابرِ فقط‌سهام‌داری در سطحِ کلِ پورتفو» کافی است.
 
-# In[44]:
+# In[46]:
 
 
 port_cc_return = (bt_summary_df['CC_TotalReturn'] * weights_df['Weight']).sum()
@@ -2239,7 +2421,7 @@ print(f"  → {'کاورد کال' if port_cc_sharpe>port_bh_sharpe else 'Buy&Ho
 
 # ## ذخیره‌ی خروجیِ بک‌تست
 
-# In[45]:
+# In[47]:
 
 
 bt_summary_df.reset_index().to_csv(DATA_DIR + 'backtest_results.csv', index=False)
@@ -2280,7 +2462,7 @@ print("✅ ذخیره شد: backtest_results.csv, backtest_portfolio_summary.csv
 # تاریخِ rebalance، فقط با داده‌یِ تا همان تاریخ، از نو می‌سازد.
 # 
 
-# In[46]:
+# In[48]:
 
 
 from scipy.stats import norm as _norm2
@@ -2320,7 +2502,7 @@ for name in ASSET_NAMES:
 print("دیدگاهِ سالانه‌شده برایِ هر ۶ سهم آماده شد (بازاستفاده از پیش‌بینی‌هایِ بخشِ ۱).")
 
 
-# In[47]:
+# In[49]:
 
 
 def run_variant_corrected(name, mechanical: bool, txn_cost: bool):
@@ -2480,7 +2662,7 @@ print(corrected_summary_df.round(3).to_string(index=False))
 # - نسبتِ پوشش: از همان دیدگاهِ رولینگ، نه میانگینِ کلِ دوره.
 # 
 
-# In[48]:
+# In[50]:
 
 
 from sklearn.covariance import LedoitWolf as _LedoitWolf2
@@ -2657,7 +2839,7 @@ print(weight_history_df.describe().T[['mean', 'min', 'max']].round(3))
 # تقویمیِ درست)، و رولینگِ کامل (بدونِ نشتِ اطلاعاتِ آینده).
 # 
 
-# In[49]:
+# In[51]:
 
 
 def portfolio_agg(results_dict, variant_name, periods_per_year):
@@ -2730,7 +2912,7 @@ print(portfolio_compare_df.round(3).to_string(index=False))
 # نشده است).
 # 
 
-# In[50]:
+# In[52]:
 
 
 years_roll = len(pcc_roll) / periods_per_year_corrected
@@ -2753,7 +2935,7 @@ print(rf_sensitivity_df.round(3).to_string(index=False))
 # کوچک بی‌معنی و انفجاری می‌شود).
 # 
 
-# In[51]:
+# In[53]:
 
 
 sp = subperiod_df[subperiod_df.Variant == 'Optimized_Monthly'].copy()
@@ -2818,7 +3000,7 @@ print(sp.groupby('Year')[['CC_Sharpe', 'BH_Sharpe']].mean().round(3))
 # است، آن را در یک بازه (۵ تا ۲۰۰) حساسیت‌سنجی می‌کنیم، نه یک عددِ واحد.
 # 
 
-# In[52]:
+# In[54]:
 
 
 from scipy.stats import skew as _skew, kurtosis as _kurtosis, norm as _norm3
@@ -2865,7 +3047,7 @@ print("نزدیکِ ۰.۵ یا کمتر یعنی نمی‌توان مهارتِ 
 # کدام فرض‌ها اصلاً در بازه‌یِ ۲۱روزه قابلِ‌دسترس است.
 # 
 
-# In[53]:
+# In[55]:
 
 
 price_limit_rows = []
@@ -2894,7 +3076,7 @@ print("   این جدول فقط حساسیت را نشان می‌دهد، نه
 # تعداد با تغییرِ کوچکِ آستانه به‌شدت عوض شود، یعنی این قاعده شکننده است.
 # 
 
-# In[54]:
+# In[56]:
 
 
 threshold_sensitivity_rows = []
@@ -2935,7 +3117,7 @@ print("دلخواه حساس است و باید در محدودیت‌هایِ �
 # برخلافِ بخش‌های قبل که فقط یک استرایکِ «بهینه» به‌ازایِ هر سهم انتخاب می‌شد.
 # 
 
-# In[55]:
+# In[57]:
 
 
 from scipy.optimize import linprog as _linprog
@@ -3034,7 +3216,7 @@ print("موتورِ LPِ بهینه‌سازیِ همزمانِ پرتفو+اخ�
 # می‌شوند — نه دو مرحله‌ی جدا.
 # 
 
-# In[56]:
+# In[58]:
 
 
 joint_rng = np.random.default_rng(123)
@@ -3125,7 +3307,7 @@ print(portfolio_compare_df.round(3).to_string(index=False))
 # دورتر (OTM) می‌شود. این را با تغییرِ λ در یک تاریخِ نمونه می‌آزماییم.
 # 
 
-# In[57]:
+# In[59]:
 
 
 sample_date = reb_dates_common[len(reb_dates_common) // 2]
@@ -3180,7 +3362,7 @@ print("Avg_Moneyness_OTM باید به سمتِ صفر (ATM) نزدیک شود."
 # rebalanceِ مشترک اجرا می‌کند.
 # 
 
-# In[58]:
+# In[60]:
 
 
 import cvxpy as cp
@@ -3250,7 +3432,7 @@ def solve_multi_maturity_qp(S0_vec, mu_vec, sigma_vec, sigma_bs_vec, corr, T1, T
 print("موتورِ QPِ چندسررسیدی (Quadratic Utility + هزینه‌ی گردش) آماده شد.")
 
 
-# In[59]:
+# In[61]:
 
 
 qp_rng = np.random.default_rng(321)
@@ -3363,7 +3545,7 @@ print(portfolio_compare_df.round(3).to_string(index=False))
 # از همین دوره‌هایِ تاریخی را می‌دیدیم، باز هم به همین جمع‌بندی می‌رسیدیم؟»
 # 
 
-# In[60]:
+# In[62]:
 
 
 from itertools import combinations as _combinations
@@ -3400,7 +3582,7 @@ print("زیرمجموعه‌ی خاص از تاریخ حساس است، نه ی�
 # ## همان تحلیل رویِ نسخه‌یِ MultiMaturity_QP_Monthly (برایِ مقایسه)
 # 
 
-# In[61]:
+# In[63]:
 
 
 qp_ret_arr = np.asarray(qp_df['cc_ret'])
@@ -3424,7 +3606,7 @@ print(f"سهمِ ترکیب‌هایی با Sharpeِ منفی: {(cpcv_qp_df['Sha
 # ## جمع‌بندیِ CPCV
 # 
 
-# In[62]:
+# In[64]:
 
 
 print("="*70)
@@ -3445,7 +3627,7 @@ else:
 # ## ذخیره‌ی خروجیِ بک‌تستِ اصلاح‌شده
 # 
 
-# In[63]:
+# In[65]:
 
 
 corrected_summary_df.to_csv(DATA_DIR + 'backtest_corrected_results.csv', index=False)
