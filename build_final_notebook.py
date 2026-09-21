@@ -270,8 +270,15 @@ for name in ASSET_NAMES:
         uncovered_ret = actual_price / S0 - 1
         cc_ret = coverage * cc_covered_ret + (1 - coverage) * uncovered_ret
 
-        rows.append(dict(date=t, S0=S0, K=best_K, premium=best_premium,
-                          actual_price=actual_price, cc_ret=cc_ret, bh_ret=uncovered_ret))
+        # پیش‌بینیِ بازده در لحظه‌ی انتخاب (best_util بالا هم از همین می‌آمد، اما
+        # خودش ذخیره نمی‌شد) -- برایِ بخشِ ۴ب که این را با بازدهِ واقعی مقایسه می‌کند.
+        e_min_final, _, _ = covered_call_physical_moments(S0, best_K, T, mu_ann, sigma_ann)
+        expected_covered_ret = e_min_final / cost_basis - 1
+        expected_uncovered_ret = np.exp(mu_ann * T) - 1
+        expected_ret = coverage * expected_covered_ret + (1 - coverage) * expected_uncovered_ret
+
+        rows.append(dict(date=t, S0=S0, K=best_K, premium=best_premium, actual_price=actual_price,
+                          cc_ret=cc_ret, bh_ret=uncovered_ret, expected_ret=expected_ret))
 
     backtest_returns[name] = pd.DataFrame(rows).set_index('date')
 

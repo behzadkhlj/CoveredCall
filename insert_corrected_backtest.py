@@ -139,8 +139,18 @@ def run_variant_corrected(name, mechanical: bool, txn_cost: bool):
         else:
             uncovered_ret_net = uncovered_ret
 
+        # پیش‌بینیِ بازده در همان لحظه‌ی انتخاب (نه بعد از وقوع) — طبقِ همان دیدگاهِ
+        # فیزیکیِ (mu_ann, sigma_ann) که Strike را انتخاب کرد، برایِ مقایسه‌یِ بعدیِ
+        # «پیش‌بینی‌شده در برابرِ واقعی».
+        e_min_final, _, _ = covered_call_physical_moments(S0, K, T, mu_ann, sigma_ann)
+        expected_covered_ret = e_min_final / cost_basis - 1
+        expected_uncovered_ret = np.exp(mu_ann * T) - 1
+        expected_ret = coverage * expected_covered_ret + (1 - coverage) * expected_uncovered_ret
+        if txn_cost:
+            expected_ret -= STOCK_TXN_COST_PCT
+
         rows.append(dict(date=t, S0=S0, K=K, premium=premium, actual_price=actual_price,
-                          cc_ret=cc_ret, bh_ret=uncovered_ret_net, year=t.year))
+                          cc_ret=cc_ret, bh_ret=uncovered_ret_net, expected_ret=expected_ret, year=t.year))
     return pd.DataFrame(rows).set_index('date')
 
 
@@ -399,9 +409,17 @@ for t in reb_dates_common:
         cc_ret = (coverage * cc_covered_ret + (1 - coverage) * uncovered_ret) - STOCK_TXN_COST_PCT
         bh_ret = uncovered_ret - STOCK_TXN_COST_PCT
 
+        # پیش‌بینیِ بازده در همان لحظه‌ی انتخاب (نه بعد از وقوع) — طبقِ همان دیدگاهِ
+        # (mu_ann, sigma_ann) که Strike را انتخاب کرد، برایِ مقایسه‌یِ بعدیِ
+        # «پیش‌بینی‌شده در برابرِ واقعی».
+        e_min_final, _, _ = covered_call_physical_moments(S0, K, T, mu_ann, sigma_ann)
+        expected_covered_ret = e_min_final / cost_basis - 1
+        expected_uncovered_ret = np.exp(mu_ann * T) - 1
+        expected_ret = (coverage * expected_covered_ret + (1 - coverage) * expected_uncovered_ret) - STOCK_TXN_COST_PCT
+
         rolling_rows[name].append(dict(date=t, S0=S0, K=K, premium=premium, actual_price=actual_price,
                                         weight=float(weights_t[name]), coverage=coverage,
-                                        cc_ret=cc_ret, bh_ret=bh_ret, year=t.year))
+                                        cc_ret=cc_ret, bh_ret=bh_ret, expected_ret=expected_ret, year=t.year))
 
 rolling_results = {name: pd.DataFrame(rows).set_index('date') for name, rows in rolling_rows.items()}
 weight_history_df = pd.DataFrame(rolling_weight_history).set_index('date')
@@ -422,38 +440,42 @@ new_cells.append(md(r"""
 new_cells.append(code(r"""
 def portfolio_agg(results_dict, variant_name, periods_per_year):
     date_union = sorted(set().union(*[set(results_dict[variant_name][n].index) for n in ASSET_NAMES]))
-    port_cc, port_bh = [], []
+    port_cc, port_bh, port_exp = [], [], []
     for t in date_union:
-        cc_t, bh_t, w_t = 0.0, 0.0, 0.0
+        cc_t, bh_t, exp_t, w_t = 0.0, 0.0, 0.0, 0.0
         for name in ASSET_NAMES:
             df_bt = results_dict[variant_name][name]
             if t in df_bt.index:
                 w = weights_df.loc[name, 'Weight']
                 cc_t += w * df_bt.loc[t, 'cc_ret']
                 bh_t += w * df_bt.loc[t, 'bh_ret']
+                exp_t += w * df_bt.loc[t, 'expected_ret']
                 w_t += w
         if w_t > 0:
             port_cc.append(cc_t / w_t)
             port_bh.append(bh_t / w_t)
-    return np.array(port_cc), np.array(port_bh)
+            port_exp.append(exp_t / w_t)
+    return np.array(port_cc), np.array(port_bh), np.array(port_exp)
 
 
 def portfolio_agg_rolling(results_dict):
     date_union = sorted(set().union(*[set(results_dict[n].index) for n in ASSET_NAMES]))
-    port_cc, port_bh = [], []
+    port_cc, port_bh, port_exp = [], [], []
     for t in date_union:
-        cc_t, bh_t, w_t = 0.0, 0.0, 0.0
+        cc_t, bh_t, exp_t, w_t = 0.0, 0.0, 0.0, 0.0
         for name in ASSET_NAMES:
             df_bt = results_dict[name]
             if t in df_bt.index:
                 w = df_bt.loc[t, 'weight']
                 cc_t += w * df_bt.loc[t, 'cc_ret']
                 bh_t += w * df_bt.loc[t, 'bh_ret']
+                exp_t += w * df_bt.loc[t, 'expected_ret']
                 w_t += w
         if w_t > 0:
             port_cc.append(cc_t / w_t)
             port_bh.append(bh_t / w_t)
-    return np.array(port_cc), np.array(port_bh)
+            port_exp.append(exp_t / w_t)
+    return np.array(port_cc), np.array(port_bh), np.array(port_exp)
 
 
 portfolio_compare_rows = []
@@ -462,22 +484,76 @@ portfolio_compare_rows.append(dict(Variant='Aggressive_Original (بخشِ ۴، �
                                     TotalReturn=port_cc_return, Sharpe=port_cc_sharpe,
                                     TR_CI90_lo=np.nan, TR_CI90_hi=np.nan))
 
+predicted_vs_actual_rows = []
+expected_series_by_variant = {}
+
 for variant_name in ['Mechanical_Monthly', 'Optimized_Monthly']:
-    pcc, pbh = portfolio_agg(corrected_results, variant_name, periods_per_year_corrected)
+    pcc, pbh, pexp = portfolio_agg(corrected_results, variant_name, periods_per_year_corrected)
     p = perf_metrics2(pcc, periods_per_year_corrected)
     ci = bootstrap_ci(pcc, periods_per_year_corrected)
     portfolio_compare_rows.append(dict(Variant=variant_name, TotalReturn=p['TotalReturn'], Sharpe=p['Sharpe'],
                                         TR_CI90_lo=ci['TotalReturn_lo'], TR_CI90_hi=ci['TotalReturn_hi']))
+    expected_series_by_variant[variant_name] = (pexp, pcc)
 
-pcc_roll, pbh_roll = portfolio_agg_rolling(rolling_results)
+pcc_roll, pbh_roll, pexp_roll = portfolio_agg_rolling(rolling_results)
 p_roll = perf_metrics2(pcc_roll, periods_per_year_corrected)
 ci_roll = bootstrap_ci(pcc_roll, periods_per_year_corrected)
 portfolio_compare_rows.append(dict(Variant='Rolling_BL_Monthly (بدونِ نشتِ اطلاعاتِ آینده)',
                                     TotalReturn=p_roll['TotalReturn'], Sharpe=p_roll['Sharpe'],
                                     TR_CI90_lo=ci_roll['TotalReturn_lo'], TR_CI90_hi=ci_roll['TotalReturn_hi']))
+expected_series_by_variant['Rolling_BL_Monthly'] = (pexp_roll, pcc_roll)
 
 portfolio_compare_df = pd.DataFrame(portfolio_compare_rows)
 print(portfolio_compare_df.round(3).to_string(index=False))
+"""))
+
+new_cells.append(md(r"""
+## پیش‌بینی‌شده در برابرِ واقعی — سطحِ دوره و سطحِ پرتفو
+
+تا این‌جا فقط بازدهِ **واقعی/رخ‌داده** (`cc_ret`) در بک‌تست ذخیره و گزارش
+می‌شد؛ بازدهی که در **همان لحظه‌ی انتخابِ Strike** با همان دیدگاهِ فیزیکیِ
+(`mu_ann`, `sigma_ann`) پیش‌بینی شده بود، محاسبه می‌شد اما هیچ‌جا ذخیره
+نمی‌شد. اینجا آن پیش‌بینی (`expected_ret`) هم برای هر دوره نگه داشته شده و
+حالا با بازدهِ واقعیِ همان دوره مقایسه می‌شود — هم به‌ازایِ هر دوره (ضریبِ
+هم‌بستگی + نرخِ هم‌جهتی/Hit Rate)، هم در سطحِ کلِ پرتفو (بازدهِ کلیِ
+پیش‌بینی‌شده به‌روشِ ترکیبی در برابرِ بازدهِ کلیِ واقعاً رخ‌داده).
+"""))
+
+new_cells.append(code(r"""
+pred_vs_actual_rows = []
+for variant_name, (pexp, pcc) in expected_series_by_variant.items():
+    p_pred = perf_metrics2(pexp, periods_per_year_corrected)
+    p_actual = perf_metrics2(pcc, periods_per_year_corrected)
+    hit_rate = float((np.sign(pexp) == np.sign(pcc)).mean())
+    corr = float(np.corrcoef(pexp, pcc)[0, 1]) if len(pexp) > 1 else np.nan
+    pred_vs_actual_rows.append(dict(
+        Variant=variant_name, N_Periods=len(pcc),
+        Predicted_TotalReturn=p_pred['TotalReturn'], Predicted_Sharpe=p_pred['Sharpe'],
+        Actual_TotalReturn=p_actual['TotalReturn'], Actual_Sharpe=p_actual['Sharpe'],
+        HitRate_SameSign=hit_rate, Corr_Predicted_vs_Actual=corr,
+    ))
+predicted_vs_actual_df = pd.DataFrame(pred_vs_actual_rows)
+print(predicted_vs_actual_df.round(3).to_string(index=False))
+print("\nHitRate_SameSign: چند درصدِ دوره‌ها، پیش‌بینی و واقعیت هم‌جهت بودند (هر دو سود یا هر دو ضرر).")
+print("Corr_Predicted_vs_Actual: هم‌بستگیِ اندازه‌یِ بازدهِ پیش‌بینی‌شده با بازدهِ واقعی، دوره‌به‌دوره.")
+"""))
+
+new_cells.append(md(r"## نمودار: بازدهِ تجمعیِ پیش‌بینی‌شده در برابرِ واقعیِ Rolling_BL_Monthly"))
+
+new_cells.append(code(r"""
+pexp_r, pcc_r = expected_series_by_variant['Rolling_BL_Monthly']
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.plot(np.cumprod(1 + pexp_r), label='پیش‌بینی‌شده (Expected)', lw=1.6)
+ax.plot(np.cumprod(1 + pcc_r), label='واقعی (Actual)', lw=1.6)
+ax.set_title('Rolling_BL_Monthly — رشدِ تجمعیِ سرمایه: پیش‌بینی‌شده در برابرِ واقعی')
+ax.set_ylabel('رشدِ تجمعی (۱ = سرمایه‌ی اولیه)')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+print(f"اختلافِ بازدهِ کلِ پیش‌بینی‌شده و واقعی برایِ Rolling_BL_Monthly: "
+      f"{(np.cumprod(1 + pexp_r)[-1] - np.cumprod(1 + pcc_r)[-1]):+.3f} "
+      f"(به‌صورتِ ضریبِ رشدِ سرمایه)")
 """))
 
 new_cells.append(md(r"""
@@ -1213,6 +1289,7 @@ qp_df.to_csv(DATA_DIR + 'backtest_multimaturity_qp_monthly.csv')
 qp_weight_history_df.to_csv(DATA_DIR + 'backtest_multimaturity_qp_weight_history.csv')
 cpcv_df.to_csv(DATA_DIR + 'backtest_cpcv_rolling_bl.csv', index=False)
 cpcv_qp_df.to_csv(DATA_DIR + 'backtest_cpcv_multimaturity_qp.csv', index=False)
+predicted_vs_actual_df.to_csv(DATA_DIR + 'backtest_predicted_vs_actual.csv', index=False)
 print("ذخیره شد: backtest_corrected_results.csv, backtest_corrected_subperiods.csv, "
       "backtest_corrected_portfolio_comparison.csv, backtest_rf_sensitivity.csv, "
       "backtest_rolling_bl_weight_history.csv, backtest_rolling_bl_<Asset>.csv, "
@@ -1220,7 +1297,8 @@ print("ذخیره شد: backtest_corrected_results.csv, backtest_corrected_subpe
       "backtest_corp_action_threshold_sensitivity.csv, backtest_joint_cvar_monthly.csv, "
       "backtest_joint_cvar_weight_history.csv, backtest_joint_cvar_structural_policy.csv, "
       "backtest_multimaturity_qp_monthly.csv, backtest_multimaturity_qp_weight_history.csv, "
-      "backtest_cpcv_rolling_bl.csv, backtest_cpcv_multimaturity_qp.csv")
+      "backtest_cpcv_rolling_bl.csv, backtest_cpcv_multimaturity_qp.csv, "
+      "backtest_predicted_vs_actual.csv")
 """))
 
 # همیشه درست قبل از آخرین سلول (که «جمع‌بندیِ نهایی» است) درج می‌شود — نه با

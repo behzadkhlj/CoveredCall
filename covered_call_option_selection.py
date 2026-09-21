@@ -431,17 +431,25 @@ for name in ASSET_NAMES:
         continue
 
     best = pd.DataFrame(rows).loc[lambda d: d['Utility'].idxmax()]
+    port_w = real_weights.get(name, np.nan)
+    # همان نسبتِ پوششِ کالیبره‌شده‌ی بخشِ ۷ (بر اساسِ اطمینانِ نظری) — برایِ
+    # هماهنگیِ روش‌شناسی؛ اینجا فقط رویِ Strikeِ واقعیِ همینِ بخش اعمال می‌شود.
+    cov = final_df.loc[name, 'Coverage_Ratio'] if name in final_df.index else np.nan
+    contribution = port_w * cov * best['Annualized_Expected_Return'] if pd.notna(port_w) and pd.notna(cov) else np.nan
     real_best_rows.append(dict(
         Asset=name, Reliable=True, Maturity_days=T_days, Strike=best['Strike'],
         Option_Symbol=best['Option_Symbol'], Premium=best['Premium'],
         P_assignment=best['P_assignment'], Annualized_Expected_Return=best['Annualized_Expected_Return'],
-        Portfolio_Weight=real_weights.get(name, np.nan),
+        Portfolio_Weight=port_w, Coverage_Ratio=cov, Contribution_to_Portfolio=contribution,
     ))
 
 real_best_df = pd.DataFrame(real_best_rows).set_index('Asset')
 fmt_real = {'OTM_pct': '{:.0%}', 'Strike': '{:,.0f}', 'Premium': '{:,.0f}', 'P_assignment': '{:.1%}',
-            'Annualized_Expected_Return': '{:.1%}', 'Portfolio_Weight': '{:.1%}'}
+            'Annualized_Expected_Return': '{:.1%}', 'Portfolio_Weight': '{:.1%}', 'Coverage_Ratio': '{:.1%}',
+            'Contribution_to_Portfolio': '{:.2%}'}
 display(real_best_df.style.format(fmt_real, na_rep='—'))
+print(f"\nمجموعِ سهمِ همه‌ی نوشتن‌های کاورد کالِ واقعی در بازدهِ کلِ پورتفو: "
+      f"{real_best_df['Contribution_to_Portfolio'].sum():.2%} (سالانه، فقط دارایی‌هایِ Reliable=True)")
 
 
 # In[11]:
