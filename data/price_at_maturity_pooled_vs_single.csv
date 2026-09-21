@@ -1,7 +1,7 @@
 Asset,N,RMSE_Naive,RMSE_SingleAsset_LGBM,RMSE_Pooled_LGBM,DirAcc_Single,DirAcc_Pooled,Pooling_Beats_SingleAsset
-Fameli,462,519.5,523.1,525.8,0.511,0.511,False
-Fulad,458,229.0,232.0,233.2,0.489,0.509,False
-IranKhodro,446,284.6,308.6,287.2,0.525,0.487,True
-Khgostar,477,460.0,467.3,463.5,0.474,0.461,True
-Shapna,463,341.9,360.0,350.4,0.486,0.488,True
-VebMellat,463,125.8,121.2,120.7,0.577,0.577,True
+Fameli,757,501.0,506.8,501.6,0.507,0.478,True
+Fulad,756,220.7,221.6,225.2,0.534,0.521,False
+IranKhodro,734,267.3,276.7,267.6,0.512,0.544,True
+Khgostar,783,450.6,459.4,454.1,0.564,0.535,True
+Shapna,761,310.9,318.6,317.2,0.557,0.522,True
+VebMellat,760,110.3,105.8,107.6,0.58,0.562,False

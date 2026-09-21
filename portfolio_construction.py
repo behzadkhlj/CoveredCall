@@ -429,6 +429,51 @@ plt.tight_layout()
 plt.show()
 
 
+# 
+# ---
+# ## ۱۲.۵) 🆕 پورتفویِ واقعی بر اساسِ زنجیره‌یِ آپشنِ بازار (Real Option Chain)
+# 
+# به‌جایِ دیدگاه‌هایِ (Views) بخشِ ۴ (که از پیش‌بینیِ Ensembleِ روی افقِ داخلیِ
+# تورنمنت‌شده می‌آمدند)، اینجا دقیقاً همان معادله‌یِ Black-Litterman را با
+# دیدگاه‌هایی که در بخشِ «۱۳.۹» نوت‌بوکِ پیش‌بینی، **مستقیماً برایِ تاریخِ
+# سررسیدِ واقعیِ ۶ قراردادِ اختیارِ خریدِ واقعاً معامله‌شده** ساخته شدند، دوباره
+# حل می‌کنیم. چون افقِ هر سهم (`H_Trading_Days`) متفاوت است، دقیقاً با همان
+# قاعده‌یِ بخشِ ۴ (`× 252 / H`) سالانه می‌شوند تا با هم قابلِ‌مقایسه بمانند.
+# 
+# ⚠️ دیدگاهِ IranKhodro از مدلِ Naive_RW (بدونِ تغییر) می‌آید — خودِ این عدد
+# برایِ Black-Litterman بی‌اشکال است، اما همان‌طور که در بخشِ ۱۳.۹ گفته شد،
+# زنجیره‌یِ Strike/Premium واقعیِ آن (به‌خاطرِ توقفِ نمادِ این سهم) قابلِ اعتماد
+# نیست — این مشکل در بخشِ بعدی (انتخابِ اختیارِ خرید) دوباره پرچم‌گذاری می‌شود.
+# 
+
+# In[12]:
+
+
+real_fc = pd.read_csv(DATA_DIR + 'real_option_chain_forecast.csv').set_index('Asset')
+
+Q_real = np.array([real_fc.loc[n, 'Predicted_Return_pct'] / 100 * 252 / real_fc.loc[n, 'H_Trading_Days']
+                    for n in ASSET_NAMES])
+omega_real_diag = np.array([
+    (real_fc.loc[n, 'Val_RMSE_logret'] * np.sqrt(252 / real_fc.loc[n, 'H_Trading_Days'])) ** 2
+    for n in ASSET_NAMES])
+Omega_real = np.diag(omega_real_diag)
+
+tauSigma_inv = np.linalg.inv(TAU * Sigma_ann)
+Omega_real_inv = np.linalg.inv(Omega_real)
+M_real = np.linalg.inv(tauSigma_inv + P.T @ Omega_real_inv @ P)
+Pi_BL_real = M_real @ (tauSigma_inv @ Pi + P.T @ Omega_real_inv @ Q_real)
+
+real_bl_df = pd.DataFrame({'Asset': ASSET_NAMES, 'Equilibrium_Prior': Pi,
+                            'Real_Option_Chain_View': Q_real, 'Black-Litterman_Posterior': Pi_BL_real})
+display(real_bl_df.style.format({c: '{:.1%}' for c in real_bl_df.columns if c != 'Asset'}))
+
+w_bl_real = optimize_max_sharpe(Pi_BL_real, Sigma_ann, RISK_FREE_RATE, lb=W_MIN, ub=W_MAX)
+real_final_df = pd.DataFrame({'Asset': ASSET_NAMES, 'Weight': w_bl_real}).sort_values('Weight', ascending=False)
+real_final_df['Weight_pct'] = (real_final_df['Weight'] * 100).round(2)
+print(f"مجموعِ وزن‌ها = {real_final_df['Weight'].sum():.6f}\n")
+display(real_final_df[['Asset', 'Weight_pct']].rename(columns={'Weight_pct': 'Weight (%)'}))
+
+
 # ## ۱۱) محدودیت‌ها و صداقتِ علمی
 # 
 # - **بازدهِ موردانتظار (Views) از نوت‌بوکِ پیش‌بینی می‌آید که خودش صادقانه نشان
@@ -449,11 +494,14 @@ plt.show()
 
 # ## ۱۲) ذخیره‌ی خروجی
 
-# In[12]:
+# In[13]:
 
 
 OUT_DIR = DATA_DIR
 final_df[['Asset', 'Weight']].to_csv(OUT_DIR + 'portfolio_weights_black_litterman.csv', index=False)
 comparison_df.to_csv(OUT_DIR + 'portfolio_methods_comparison.csv', index=False)
-print("✅ ذخیره شد: portfolio_weights_black_litterman.csv, portfolio_methods_comparison.csv")
+real_final_df[['Asset', 'Weight']].to_csv(OUT_DIR + 'real_portfolio_weights_black_litterman.csv', index=False)
+real_bl_df.to_csv(OUT_DIR + 'real_portfolio_views_black_litterman.csv', index=False)
+print("✅ ذخیره شد: portfolio_weights_black_litterman.csv, portfolio_methods_comparison.csv, "
+      "real_portfolio_weights_black_litterman.csv, real_portfolio_views_black_litterman.csv")
 

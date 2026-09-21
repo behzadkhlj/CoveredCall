@@ -81,7 +81,7 @@ MATURITY_CANDIDATES  = [10, 15, 20, 30]   # کاندیدهای افق سررسی
 HORIZON_WF_SPLITS    = 4
 HORIZON_MIN_MARGIN   = 0.01
 VAL_FRAC             = 0.15
-TEST_FRAC            = 0.15
+TEST_FRAC            = 0.25   # افزایش‌یافته از ۰.۱۵ برای دو برابر شدنِ تقریبیِ تعدادِ دوره‌هایِ بک‌تست
 RECENCY_HALF_LIFE     = 500        # نیم‌عمر وزنِ نمایی (ردیف) ~ ۲ سالِ معاملاتی
 
 print(f"✅ Ready | assets={ASSET_NAMES} | data_dir={DATA_DIR}")
@@ -288,9 +288,13 @@ print("✅ build_features() آماده است —",
 
 from arch import arch_model
 
-def garch_vol_feature(close, n_pretest):
+def garch_vol_feature(close, n_train_only):
+    # نکته: پارامتر باید مرزِ *فقط Train* باشد، نه Pre-test (Train+Val) —
+    # وگرنه GARCH هنگامِ برآوردِ پارامترها، بازده‌های دوره‌ی Validation را هم
+    # می‌بیند (نشتِ خفیف به Validation، حتی اگر مدلِ ML خودش Validation را
+    # ندیده باشد).
     logret_pct = (np.log(close / close.shift(1)) * 100).dropna()
-    train_part = logret_pct.iloc[:n_pretest]
+    train_part = logret_pct.iloc[:n_train_only]
     try:
         am = arch_model(train_part, vol='GARCH', p=1, q=1, dist='t', rescale=False)
         res = am.fit(disp='off', show_warning=False)
@@ -386,7 +390,8 @@ def evaluate_horizon(feat_no_target, close, h, n_pretest):
     feat = feat_no_target.copy()
     feat['target'] = target
     feat = feat.dropna()
-    feat = feat[feat.index <= close.index[n_pretest - 1]]
+    eligible_end = max(n_pretest - 1 - h, 0)   # embargo: h روزِ آخرِ پیش از مرزِ
+    feat = feat[feat.index <= close.index[eligible_end]]
     X = feat.drop(columns='target').values
     y = feat['target'].values
     folds = purged_walkforward_folds(len(feat), HORIZON_WF_SPLITS, purge=h)
@@ -412,6 +417,8 @@ print("✅ evaluate_horizon() آماده است")
 
 
 # ## ۶) مدل‌ها + تیونینگِ هایپرپارامتر (برای هر مدل جداگانه)
+# 
+# 🆕 **GARCH_LSTM_Hybrid**: به‌جایِ استفاده از `garch_vol` صرفاً به‌عنوانِ یک فیچرِ عادی (که همه‌ی مدل‌ها از قبل به آن دسترسی دارند)، اینجا یک ترکیبِ واقعیِ GARCH+LSTM پیاده می‌شود: هدفِ آموزشِ SeqNet نه بازدهِ خامِ H-روزه، بلکه بازدهِ **استانداردشده با نوسانِ شرطیِ GARCH** است (`y_std = y / (garch_vol * sqrt(H))`) — یعنی اثرِ خوشه‌بندیِ نوسان (heteroskedasticity) قبل از آموزش حذف می‌شود تا شبکه روی الگویِ خودِ بازده تمرکز کند، نه دامنه‌ی نوسانش. در پیش‌بینی، خروجیِ شبکه دوباره در `garch_vol*sqrt(H)` ضرب می‌شود تا به مقیاسِ بازدهِ واقعی برگردد. این دقیقاً همان معماریِ رایجِ «GARCH-LSTM hybrid» در ادبیاتِ پیش‌بینیِ قیمت است.
 # 
 # **Baselineهای مالیِ کلاسیک** (برای این‌که مدل‌های ML مجبور باشند واقعاً چیزی «اضافه»
 # کنند، نه این‌که صرفاً از یک baseline ضعیف بهتر باشند):
@@ -485,6 +492,7 @@ import catboost as cb
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import GridSearchCV
 import optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -680,6 +688,7 @@ for name in ASSET_NAMES:
     feat_raw = build_features(df, usd_close, mkt_loo[name])
     n_all = len(df)
     n_pretest = int(n_all * (1 - TEST_FRAC))
+    n_train_only_approx = int(n_all * (1 - TEST_FRAC - VAL_FRAC))  # برایِ GARCH: تقریبیِ مرزِ فقط-Train
 
     print("افق‌ها (Skill = 1 - RMSE_model/RMSE_drift؛ بالاتر = قابل‌پیش‌بینی‌تر):")
     horizon_scores = {}
@@ -694,7 +703,7 @@ for name in ASSET_NAMES:
     print(f"  -> افقِ سررسیدِ انتخاب‌شده: H = {H} روزِ معاملاتی")
 
     target = np.log(df['close'].shift(-H) / df['close'])
-    garch_vol = garch_vol_feature(df['close'], n_pretest)
+    garch_vol = garch_vol_feature(df['close'], n_train_only_approx)
     feat = feat_raw.copy()
     feat['garch_vol'] = garch_vol
     feat['target'] = target
@@ -729,16 +738,19 @@ for name in ASSET_NAMES:
 
     cv_purged = PurgedWalkForwardCV(len(X_train), n_splits=3, purge=H)
 
-    scaler_r = StandardScaler().fit(X_train)
-    Xtr_scaled = scaler_r.transform(X_train)
-    ridge_gcv = GridSearchCV(Ridge(), {'alpha': [0.1, 1, 3, 10, 30, 100]},
+    # Pipeline(scaler, Ridge) به‌جایِ fit-کردنِ scaler روی کلِ X_train قبل از CV —
+    # این‌طوری هر foldِ purged CV اسکیلرِ خودش را فقط رویِ train-foldِ خودش
+    # fit می‌کند (رفعِ نشتِ فولدهایِ اولیه به آمارِ فولدهایِ بعدی).
+    ridge_pipe = Pipeline([('scaler', StandardScaler()), ('ridge', Ridge())])
+    ridge_gcv = GridSearchCV(ridge_pipe, {'ridge__alpha': [0.1, 1, 3, 10, 30, 100]},
                               scoring='neg_root_mean_squared_error', cv=cv_purged, n_jobs=-1)
-    ridge_gcv.fit(Xtr_scaled, y_train, sample_weight=w_train)
+    ridge_gcv.fit(X_train, y_train, ridge__sample_weight=w_train)
     ridge = ridge_gcv.best_estimator_
-    ridge.fit(Xtr_scaled, y_train, sample_weight=w_train)   # refit on full Train with the chosen alpha
-    model_preds_val['Ridge'] = ridge.predict(scaler_r.transform(X_val))
-    model_preds_test['Ridge'] = ridge.predict(scaler_r.transform(X_test))
-    print(f"  [GridSearchCV] Ridge best alpha = {ridge_gcv.best_params_['alpha']}")
+    ridge.fit(X_train, y_train, ridge__sample_weight=w_train)   # refit on full Train with the chosen alpha
+    scaler_r = ridge.named_steps['scaler']  # نگه‌داشته می‌شود چون جاهایِ دیگر به آن ارجاع می‌دهند
+    model_preds_val['Ridge'] = ridge.predict(X_val)
+    model_preds_test['Ridge'] = ridge.predict(X_test)
+    print(f"  [GridSearchCV] Ridge best alpha = {ridge_gcv.best_params_['ridge__alpha']}")
 
     best_lgb = tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=40)
     lgb_params = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1)
@@ -758,6 +770,10 @@ for name in ASSET_NAMES:
         qm = lgb.train(qp, dtr, num_boost_round=500, valid_sets=[dval], callbacks=[lgb.early_stopping(40, verbose=False)])
         q_models[q] = qm
     q_pred_test = {q: m.predict(X_test, num_iteration=m.best_iteration) for q, m in q_models.items()}
+    # اصلاحِ Quantile Crossing: q0.1/q0.5/q0.9 مستقل fit شده‌اند و ممکن است
+    # هم‌ردیف نامرتب باشند (q10>q50 مثلاً)؛ با sort ردیفی، monotonic می‌شوند.
+    _q_stack = np.sort(np.stack([q_pred_test[0.1], q_pred_test[0.5], q_pred_test[0.9]], axis=0), axis=0)
+    q_pred_test[0.1], q_pred_test[0.5], q_pred_test[0.9] = _q_stack[0], _q_stack[1], _q_stack[2]
 
     best_xgb = tune_xgb(X_train, y_train, w_train, X_val, y_val, n_trials=30)
     xgb_model = xgb.XGBRegressor(n_estimators=500, max_depth=best_xgb['max_depth'], learning_rate=best_xgb['lr'],
@@ -794,8 +810,25 @@ for name in ASSET_NAMES:
     model_preds_test['DeepSeq'] = pred_test_seq
     print(f"  [Grid Search معماری] بهترینِ DeepSeq برای {name}: {seq_name}")
 
+    # 🆕 GARCH_LSTM_Hybrid: هدفِ آموزش = بازدهِ استانداردشده با نوسانِ شرطیِ GARCH
+    # (نه بازدهِ خام مثلِ DeepSeq بالا) — رفعِ اثرِ heteroskedasticity قبل از آموزشِ LSTM.
+    garch_col_idx = feature_cols.index('garch_vol')
+    vol_scale_train = np.maximum(X_train[:, garch_col_idx], 1e-4) * np.sqrt(H)
+    vol_scale_val = np.maximum(X_val[:, garch_col_idx], 1e-4) * np.sqrt(H)
+    vol_scale_test = np.maximum(X_test[:, garch_col_idx], 1e-4) * np.sqrt(H)
+    y_train_std = y_train / vol_scale_train
+    y_val_std = y_val / vol_scale_val
+
+    net_gh, scaler_gh, window_gh, cfg_gh = tune_seqnet(X_train, y_train_std, X_val, y_val_std, window=20)
+    pred_val_gh_std = predict_seqnet(net_gh, scaler_gh, window_gh, X_train[-window_gh:], X_val)
+    Xtr_val_tail_gh = np.vstack([X_train[-window_gh:], X_val])[-window_gh:]
+    pred_test_gh_std = predict_seqnet(net_gh, scaler_gh, window_gh, Xtr_val_tail_gh, X_test)
+    model_preds_val['GARCH_LSTM_Hybrid'] = pred_val_gh_std * vol_scale_val
+    model_preds_test['GARCH_LSTM_Hybrid'] = pred_test_gh_std * vol_scale_test
+    print(f"  [Grid Search معماری] بهترینِ GARCH_LSTM_Hybrid برای {name}: {seq_label(cfg_gh)}")
+
     all_names = ['Naive_RW', 'Drift_RW', 'GBM_GARCH', 'Ridge', 'LightGBM', 'XGBoost',
-                 'CatBoost', 'RandomForest', 'DeepSeq']
+                 'CatBoost', 'RandomForest', 'DeepSeq', 'GARCH_LSTM_Hybrid']
     val_rmses = {k: np.sqrt(np.mean((model_preds_val[k] - y_val) ** 2)) for k in all_names}
     inv = {k: 1.0 / max(v, 1e-6) ** 4 for k, v in val_rmses.items()}
     tot = sum(inv.values())
@@ -847,7 +880,7 @@ for name in ASSET_NAMES:
         p_train=p_train, p_val=p_val, p_test=p_test, dates_test=dates_test,
         lgb_model=lgb_model, lgb_params=lgb_params, xgb_model=xgb_model, cb_model=cb_model,
         rf_model=rf, rf_best_params=rf_gcv.best_params_,
-        ridge_model=ridge, ridge_best_alpha=ridge_gcv.best_params_['alpha'], scaler_r=scaler_r,
+        ridge_model=ridge, ridge_best_alpha=ridge_gcv.best_params_['ridge__alpha'], scaler_r=scaler_r,
         seq_net=net, seq_scaler=seq_scaler, seq_window=seq_window, seq_cfg=seq_cfg, seq_name=seq_name,
         q_models=q_models, weights=weights, recommended_model=recommended_model,
         model_preds_val=model_preds_val, model_preds_test=model_preds_test,
@@ -953,7 +986,7 @@ plt.show()
 
 
 model_order = ['Naive_RW', 'Drift_RW', 'GBM_GARCH', 'Ridge', 'LightGBM', 'XGBoost',
-               'CatBoost', 'RandomForest', 'DeepSeq', 'Ensemble']
+               'CatBoost', 'RandomForest', 'DeepSeq', 'GARCH_LSTM_Hybrid', 'Ensemble']
 pivot_rmse = results_df.pivot_table(index='Model', columns='Asset', values='RMSE_price').reindex(model_order)
 fig, ax = plt.subplots(figsize=(12, 5))
 pivot_rmse.T.plot(kind='bar', ax=ax, width=0.85)
@@ -1255,6 +1288,186 @@ print(f"\nنمونه برای {best_asset} (بیشترین بهبودِ AUC نس
 display(sample)
 
 
+# 
+# ---
+# ## ۱۳.۹) 🆕 پیش‌بینیِ واقعی روی زنجیره‌ی آپشنِ بازار (Real Market Option Chain)
+# 
+# شش فایلِ `Zameli.xlsx / Zafla.xlsx / Zkhod.xlsx / Zastar.xlsx / Zashna.xlsx / Zamelat.xlsx`
+# زنجیره‌ی واقعیِ اختیارِ خرید (Call Option) هرکدام از ۶ سهم را از بازارِ واقعیِ بورسِ تهران
+# دربردارند (نمادِ پایه، نمادِ اختیار، تاریخِ سررسید به تقویمِ جلالی، قیمتِ اعمال، و پرمیومِ
+# واقعیِ معامله‌شده). این دقیقاً همان محدودیتی است که پیش‌تر (در مقایسه با Diaz & Kwon) به‌عنوانِ
+# «عدمِ دسترسی به داده‌ی واقعیِ بازارِ آپشن» غیرقابل‌رفع اعلام شده بود — این بخش آن را با
+# داده‌ی واقعی جبران می‌کند.
+# 
+# ⚠️ **محدودیتِ صادقانه:** تاریخِ قیمتِ سهام در دیتاستِ فعلی فقط تا **۱۶ آوریلِ ۲۰۲۵** (۲۷
+# فروردینِ ۱۴۰۴) موجود است، اما تاریخِ سررسیدِ این ۶ قرارداد همگی بعد از این بازه‌اند (از ۳
+# خردادِ ۱۴۰۴ تا ۸ مردادِ ۱۴۰۴). بنابراین **مقدارِ واقعیِ قیمت در تاریخِ سررسید در دسترس نیست** و
+# فقط پیش‌بینیِ خارج‌از-نمونه (Out-of-Sample) ارائه می‌شود — نه مقایسه‌ی خطا. به‌محضِ در دسترس
+# قرارگرفتنِ داده‌ی قیمتِ به‌روزتر، ستونِ `Actual_Price` در جدولِ زیر قابلِ تکمیل خواهد بود.
+# 
+# برای هر سهم: افقِ پیش‌بینی (`H_Trading_Days`) نه از تورنمنتِ داخلیِ بخشِ ۵، بلکه از فاصله‌ی
+# واقعیِ روزهایِ معاملاتی تا تاریخِ سررسیدِ همینِ قراردادِ واقعی محاسبه می‌شود؛ سپس یک
+# Ridge + LightGBM سبک (با همان زیرساختِ Purged CV و وزن‌دهیِ زمانیِ بخش‌های قبل) دقیقاً برای
+# همین افق دوباره آموزش می‌بیند (چون مدل‌هایِ بخشِ ۷ برایِ افقِ تورنمنت‌شده‌یِ خودشان تیون
+# شده‌اند، نه لزوماً همین افق).
+# 
+
+# In[21]:
+
+
+import jdatetime
+
+REAL_OPTION_FILES = {
+    'Fameli':     'Zameli.xlsx',
+    'Fulad':      'Zafla.xlsx',
+    'IranKhodro': 'Zkhod.xlsx',
+    'Khgostar':   'Zastar.xlsx',
+    'Shapna':     'Zashna.xlsx',
+    'VebMellat':  'Zamelat.xlsx',
+}
+REPO_DIR = os.getcwd()
+
+
+def jalali_to_gregorian_ts(jalali_str):
+    y, m, d = (int(x) for x in jalali_str.split('/'))
+    return pd.Timestamp(jdatetime.date(y, m, d).togregorian())
+
+
+real_chain = {}
+for name, fname in REAL_OPTION_FILES.items():
+    fpath = os.path.join(REPO_DIR, fname)
+    if not os.path.exists(fpath):
+        print(f"⚠️ فایلِ {fname} پیدا نشد؛ {name} از این بخش رد می‌شود.")
+        continue
+    dfc = pd.read_excel(fpath)
+    dfc.columns = [c.strip() for c in dfc.columns]
+    real_chain[name] = dfc
+
+real_forecast_rows, real_strike_rows = [], []
+
+for name, dfc in real_chain.items():
+    df = processed[name]
+    last_date = df.index.max()
+    last_close = float(df['close'].iloc[-1])
+    expiration_jalali = str(dfc['Expiration Date'].iloc[0])
+    expiration_greg = jalali_to_gregorian_ts(expiration_jalali)
+    calendar_days = (expiration_greg - last_date).days
+    if calendar_days <= 0:
+        print(f"⚠️ {name}: سررسید ({expiration_greg.date()}) قبل یا هم‌زمان با آخرین داده‌ی موجود "
+              f"({last_date.date()}) است؛ رد می‌شود.")
+        continue
+    H_target = max(1, round(calendar_days * 252.0 / 365.0))  # تبدیلِ روزِ تقویمی به روزِ معاملاتی
+
+    feat_raw = build_features(df, usd_close, mkt_loo[name])
+    n_all = len(df)
+    garch_vol = garch_vol_feature(df['close'], int(n_all * (1 - VAL_FRAC)))
+    feat_full = feat_raw.copy()
+    feat_full['garch_vol'] = garch_vol
+    feature_cols_real = list(feat_full.columns)
+
+    predict_row = feat_full.iloc[[-1]]
+    if predict_row.isna().any(axis=1).iloc[0]:
+        print(f"⚠️ {name}: فیچرهایِ آخرین روز ناقص است؛ رد می‌شود.")
+        continue
+    X_predict = predict_row[feature_cols_real].values
+
+    feat_full['target'] = np.log(df['close'].shift(-H_target) / df['close'])
+    feat_train = feat_full.dropna()
+    X_all, y_all = feat_train[feature_cols_real].values, feat_train['target'].values
+    n = len(feat_train)
+    n_val = max(int(n * VAL_FRAC), 50)
+    train_end = max(n - n_val - H_target, 1)
+    val_start = train_end + H_target
+    X_train, y_train = X_all[:train_end], y_all[:train_end]
+    X_val, y_val = X_all[val_start:], y_all[val_start:]
+    if len(X_train) < 200 or len(X_val) < 20:
+        print(f"⚠️ {name}: داده‌ی کافی برایِ Train/Val با H={H_target} روزِ معاملاتی نیست؛ رد می‌شود.")
+        continue
+    w_train = recency_weights(len(X_train))
+
+    val_rmse, val_pred_h, test_pred_h = {}, {}, {}
+    val_rmse['Naive_RW'] = np.sqrt(np.mean(y_val ** 2))
+    test_pred_h['Naive_RW'] = 0.0
+    drift = y_train.mean()
+    val_rmse['Drift_RW'] = np.sqrt(np.mean((y_val - drift) ** 2))
+    test_pred_h['Drift_RW'] = drift
+
+    ridge_pipe = Pipeline([('scaler', StandardScaler()), ('ridge', Ridge())])
+    cv_real = PurgedWalkForwardCV(len(X_train), n_splits=3, purge=H_target)
+    ridge_gcv = GridSearchCV(ridge_pipe, {'ridge__alpha': [0.1, 1, 3, 10, 30, 100]},
+                              scoring='neg_root_mean_squared_error', cv=cv_real, n_jobs=-1)
+    ridge_gcv.fit(X_train, y_train, ridge__sample_weight=w_train)
+    ridge_real = ridge_gcv.best_estimator_
+    ridge_real.fit(X_train, y_train, ridge__sample_weight=w_train)
+    val_rmse['Ridge'] = np.sqrt(np.mean((ridge_real.predict(X_val) - y_val) ** 2))
+    test_pred_h['Ridge'] = ridge_real.predict(X_predict)[0]
+
+    best_lgb = tune_lgbm(X_train, y_train, w_train, X_val, y_val, n_trials=20)
+    lgb_params_real = dict(objective='regression', metric='rmse', verbose=-1, seed=GLOBAL_SEED, bagging_freq=1,
+                            learning_rate=best_lgb['lr'], num_leaves=best_lgb['num_leaves'],
+                            min_data_in_leaf=best_lgb['min_data_in_leaf'], feature_fraction=best_lgb['ff'],
+                            bagging_fraction=best_lgb['bf'], lambda_l2=best_lgb['l2'])
+    dtr = lgb.Dataset(X_train, label=y_train, weight=w_train)
+    dval = lgb.Dataset(X_val, label=y_val, reference=dtr)
+    lgb_real = lgb.train(lgb_params_real, dtr, num_boost_round=500, valid_sets=[dval],
+                          callbacks=[lgb.early_stopping(40, verbose=False)])
+    val_rmse['LightGBM'] = np.sqrt(np.mean(
+        (lgb_real.predict(X_val, num_iteration=lgb_real.best_iteration) - y_val) ** 2))
+    test_pred_h['LightGBM'] = lgb_real.predict(X_predict, num_iteration=lgb_real.best_iteration)[0]
+
+    recommended = min(val_rmse, key=val_rmse.get)
+    predicted_return = test_pred_h[recommended]
+    predicted_price = last_close * np.exp(predicted_return)
+
+    real_forecast_rows.append(dict(
+        Asset=name, Base_Symbol_FA=dfc['Base Asset Symbol'].iloc[0],
+        Expiration_Date_Jalali=expiration_jalali, Expiration_Date_Gregorian=expiration_greg.date(),
+        Last_Available_Date=last_date.date(), Calendar_Days_Ahead=calendar_days, H_Trading_Days=H_target,
+        Last_Close=last_close, Recommended_Model=recommended, Val_RMSE_logret=round(val_rmse[recommended], 4),
+        Predicted_Return_pct=round(predicted_return * 100, 2), Predicted_Price=round(predicted_price, 1),
+        Actual_Price=np.nan, Note='داده‌یِ قیمتِ واقعی تا این تاریخ در دیتاست موجود نیست',
+    ))
+
+    dfc_sorted = dfc.sort_values('Strike Price')
+    otm = dfc_sorted[dfc_sorted['Strike Price'] >= predicted_price]
+    nearest = otm.iloc[0] if len(otm) else dfc_sorted.iloc[-1]
+    strike_gap_pct = (nearest['Strike Price'] / predicted_price - 1) * 100
+    if abs(strike_gap_pct) > 50:
+        print(f"  ⚠️ {name}: فاصله‌ی نزدیک‌ترین اعتصابِ واقعی تا قیمتِ پیش‌بینی‌شده {strike_gap_pct:+.0f}% "
+              f"است — این معمولاً نشانه‌ی رویدادِ شرکتی (مثلِ افزایشِ سرمایه) در فاصله‌ی زمانیِ بین "
+              f"آخرین قیمتِ ثبت‌شده‌ی ما ({last_date.date()}) و زمانِ واقعیِ این زنجیره‌ی آپشن است، "
+              f"نه یک پیشنهادِ OTM معتبر؛ بدونِ داده‌ی قیمتِ به‌روز، این مقایسه برایِ {name} قابلِ اعتماد نیست.")
+    real_strike_rows.append(dict(
+        Asset=name, Predicted_Price=round(predicted_price, 1),
+        Nearest_OTM_Strike=nearest['Strike Price'], Option_Symbol=nearest['Call Option Symbol'],
+        Quoted_Premium=nearest['Premium'],
+        Premium_Yield_pct=round(nearest['Premium'] / last_close * 100, 2),
+        Strike_vs_Predicted_pct=round(strike_gap_pct, 1),
+        Reliable=abs(strike_gap_pct) <= 50,
+    ))
+    print(f"{name}: H={H_target} روزِ معاملاتی -> سررسیدِ واقعی {expiration_greg.date()} | "
+          f"مدلِ منتخب={recommended} | قیمتِ پیش‌بینی‌شده={predicted_price:,.0f} "
+          f"(آخرین قیمتِ موجود={last_close:,.0f})")
+
+real_forecast_df = pd.DataFrame(real_forecast_rows)
+real_strike_df = pd.DataFrame(real_strike_rows)
+real_forecast_df
+
+
+# 
+# ### پیشنهادِ اعتصاب از رویِ زنجیره‌یِ واقعیِ بازار
+# 
+# برایِ هر سهم، نزدیک‌ترین اعتصابِ OTM (یعنی اولین اعتصابی که مساوی یا بالاترِ قیمتِ
+# پیش‌بینی‌شده باشد) از میانِ اعتصاب‌هایِ **واقعاً معامله‌شده** در بازار انتخاب می‌شود و
+# پرمیومِ **واقعیِ** آن (نه پرمیومِ نظریِ Black-Scholes) گزارش می‌شود.
+# 
+
+# In[22]:
+
+
+real_strike_df
+
+
 # ## ۱۴) نتیجه‌گیریِ صادقانه و محدودیت‌ها
 # 
 # **یافته‌های اصلی:**
@@ -1309,7 +1522,7 @@ display(sample)
 
 # ## ۱۵) ذخیره‌ی خروجی‌ها
 
-# In[21]:
+# In[23]:
 
 
 OUT_DIR = os.path.join(os.getcwd(), 'data') + os.sep
@@ -1318,6 +1531,8 @@ best_model_df.to_csv(OUT_DIR + 'price_at_maturity_recommended_models.csv', index
 robustness_df.to_csv(OUT_DIR + 'price_at_maturity_walkforward_robustness.csv', index=False)
 pool_compare_df.to_csv(OUT_DIR + 'price_at_maturity_pooled_vs_single.csv', index=False)
 strike_df.to_csv(OUT_DIR + 'price_at_maturity_strike_crossing_auc.csv', index=False)
+real_forecast_df.to_csv(OUT_DIR + 'real_option_chain_forecast.csv', index=False)
+real_strike_df.to_csv(OUT_DIR + 'real_option_chain_strike_recommendation.csv', index=False)
 
 horizon_log_rows = []
 for name, art in ASSET_ARTIFACTS.items():
@@ -1334,7 +1549,8 @@ for name in ASSET_NAMES:
 print("✅ خروجی‌ها ذخیره شدند:")
 for f in ['price_at_maturity_results.csv', 'price_at_maturity_recommended_models.csv',
           'price_at_maturity_walkforward_robustness.csv', 'price_at_maturity_horizon_selection.csv',
-          'price_at_maturity_pooled_vs_single.csv', 'price_at_maturity_strike_crossing_auc.csv']:
+          'price_at_maturity_pooled_vs_single.csv', 'price_at_maturity_strike_crossing_auc.csv',
+          'real_option_chain_forecast.csv', 'real_option_chain_strike_recommendation.csv']:
     print('  -', f)
 print(f"  - price_at_maturity_predictions_<asset>.csv برای هر یک از {len(ASSET_NAMES)} سهم")
 

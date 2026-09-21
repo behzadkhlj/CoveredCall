@@ -16,3 +16,6 @@ CLASSROOM_ONLY_*.csv
 _tournament_checkpoints/
 run_log*.txt
 catboost_info/
+models/chronos-bolt-small/model.safetensors
+models/timesfm/model.safetensors
+models/chronos-bolt-small-lora/merged_state_dict.pt

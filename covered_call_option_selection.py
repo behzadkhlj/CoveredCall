@@ -356,6 +356,120 @@ for name in ASSET_NAMES:
     print(f"  → بازدهِ موردِانتظارِ سالانه‌شده: {b['Annualized_Expected_Return']:.1%}")
 
 
+# 
+# ---
+# ## ۸.۵) 🆕 انتخابِ اختیارِ خرید از رویِ زنجیره‌یِ واقعیِ بازار (Real Option Chain)
+# 
+# بخش‌های قبل، پرمیوم را با بلک-شولزِ نظری روی یک شبکه‌یِ Strike/سررسیدِ ساختگی
+# محاسبه می‌کردند. اینجا، برایِ هرکدام از ۶ سهم، به‌جایِ آن شبکه، از میانِ
+# Strikeهایی که **واقعاً در بازار معامله می‌شوند** (همان فایل‌هایِ
+# `Zameli/Zafla/Zkhod/Zastar/Zashna/Zamelat.xlsx`) و با **پرمیومِ واقعیِ
+# معامله‌شده‌شان** (نه پرمیومِ نظری)، بهترین Strike از نظرِ مطلوبیتِ
+# میانگین-واریانس انتخاب می‌شود. دیدگاهِ فیزیکی (`mu_ann`, `sigma_ann_view`) و
+# افقِ زمانی هم از پیش‌بینیِ واقعیِ بخشِ ۱۳.۹ نوت‌بوکِ پیش‌بینی می‌آیند (نه از
+# تورنمنتِ داخلی)، پس این بخش سرتاسر با «همینِ دادهٔ واقعی» کار می‌کند.
+# 
+# ⚠️ برایِ IranKhodro (که در بخشِ ۱۳.۹ به‌خاطرِ توقفِ نمادِ سهم `Reliable=False`
+# علامت خورد)، انتخابِ Strike انجام نمی‌شود — فقط دلیلِ رد‌شدن گزارش می‌شود.
+# 
+
+# In[10]:
+
+
+REAL_OPTION_FILES = {
+    'Fameli':     'Zameli.xlsx',
+    'Fulad':      'Zafla.xlsx',
+    'IranKhodro': 'Zkhod.xlsx',
+    'Khgostar':   'Zastar.xlsx',
+    'Shapna':     'Zashna.xlsx',
+    'VebMellat':  'Zamelat.xlsx',
+}
+REPO_DIR = os.getcwd()
+DAYCOUNT_REAL = 365.0
+
+real_fc = pd.read_csv(DATA_DIR + 'real_option_chain_forecast.csv').set_index('Asset')
+real_flags = pd.read_csv(DATA_DIR + 'real_option_chain_strike_recommendation.csv').set_index('Asset')
+try:
+    real_weights = pd.read_csv(DATA_DIR + 'real_portfolio_weights_black_litterman.csv').set_index('Asset')['Weight']
+except FileNotFoundError:
+    real_weights = pd.Series(np.nan, index=ASSET_NAMES)
+
+real_best_rows = []
+for name in ASSET_NAMES:
+    is_reliable = bool(real_flags.loc[name, 'Reliable']) if name in real_flags.index else False
+    if not is_reliable:
+        real_best_rows.append(dict(Asset=name, Reliable=False,
+            Note='دادهٔ زنجیرهٔ آپشنِ واقعی با آخرین قیمتِ ثبت‌شده هم‌خوانی ندارد '
+                 '(رجوع به هشدارِ بخشِ ۱۳.۹ نوت‌بوکِ پیش‌بینی) — Strike انتخاب نشد.'))
+        continue
+
+    dfc = pd.read_excel(os.path.join(REPO_DIR, REAL_OPTION_FILES[name]))
+    dfc.columns = [c.strip() for c in dfc.columns]
+    S0 = float(processed[name]['close'].iloc[-1])
+    T_days = int(real_fc.loc[name, 'Calendar_Days_Ahead'])
+    T = T_days / DAYCOUNT_REAL
+    H_real = real_fc.loc[name, 'H_Trading_Days']
+    mu_ann = real_fc.loc[name, 'Predicted_Return_pct'] / 100 * 252 / H_real
+    sigma_ann_view = real_fc.loc[name, 'Val_RMSE_logret'] * np.sqrt(252 / H_real)
+
+    rows = []
+    for _, opt in dfc.iterrows():
+        K, premium = float(opt['Strike Price']), float(opt['Premium'])
+        cost_basis = S0 - premium
+        if premium <= 0 or K <= 0 or cost_basis <= 0:
+            continue
+        e_min, var_min, p_assign = covered_call_physical_moments(S0, K, T, mu_ann, sigma_ann_view)
+        ann_exp_ret = (e_min / cost_basis) ** (DAYCOUNT_REAL / T_days) - 1
+        ann_var_ret = (var_min / cost_basis ** 2) * (DAYCOUNT_REAL / T_days)
+        rows.append(dict(Strike=K, Option_Symbol=opt['Call Option Symbol'], Premium=premium,
+                          P_assignment=p_assign, Annualized_Expected_Return=ann_exp_ret,
+                          Utility=ann_exp_ret - 0.5 * DELTA * ann_var_ret))
+
+    if not rows:
+        real_best_rows.append(dict(Asset=name, Reliable=False,
+            Note='هیچ اعتصابی با پرمیومِ مثبت و پایه‌ی سرمایه‌یِ معتبر در این زنجیره یافت نشد.'))
+        continue
+
+    best = pd.DataFrame(rows).loc[lambda d: d['Utility'].idxmax()]
+    port_w = real_weights.get(name, np.nan)
+    # همان نسبتِ پوششِ کالیبره‌شده‌ی بخشِ ۷ (بر اساسِ اطمینانِ نظری) — برایِ
+    # هماهنگیِ روش‌شناسی؛ اینجا فقط رویِ Strikeِ واقعیِ همینِ بخش اعمال می‌شود.
+    cov = final_df.loc[name, 'Coverage_Ratio'] if name in final_df.index else np.nan
+    contribution = port_w * cov * best['Annualized_Expected_Return'] if pd.notna(port_w) and pd.notna(cov) else np.nan
+    real_best_rows.append(dict(
+        Asset=name, Reliable=True, Maturity_days=T_days, Strike=best['Strike'],
+        Option_Symbol=best['Option_Symbol'], Premium=best['Premium'],
+        P_assignment=best['P_assignment'], Annualized_Expected_Return=best['Annualized_Expected_Return'],
+        Portfolio_Weight=port_w, Coverage_Ratio=cov, Contribution_to_Portfolio=contribution,
+    ))
+
+real_best_df = pd.DataFrame(real_best_rows).set_index('Asset')
+fmt_real = {'OTM_pct': '{:.0%}', 'Strike': '{:,.0f}', 'Premium': '{:,.0f}', 'P_assignment': '{:.1%}',
+            'Annualized_Expected_Return': '{:.1%}', 'Portfolio_Weight': '{:.1%}', 'Coverage_Ratio': '{:.1%}',
+            'Contribution_to_Portfolio': '{:.2%}'}
+display(real_best_df.style.format(fmt_real, na_rep='—'))
+print(f"\nمجموعِ سهمِ همه‌ی نوشتن‌های کاورد کالِ واقعی در بازدهِ کلِ پورتفو: "
+      f"{real_best_df['Contribution_to_Portfolio'].sum():.2%} (سالانه، فقط دارایی‌هایِ Reliable=True)")
+
+
+# In[11]:
+
+
+print("="*78)
+print("پیشنهادِ نهاییِ نوشتنِ اختیارِ خرید — بر اساسِ زنجیره‌یِ واقعیِ بازار")
+print("="*78)
+for name in ASSET_NAMES:
+    r = real_best_df.loc[name]
+    if not r['Reliable']:
+        print(f"\n{name}: ⚠️ {r['Note']}")
+        continue
+    print(f"\n{name} (وزنِ پورتفویِ واقعی: {r['Portfolio_Weight']:.1%}):")
+    print(f"  → سررسیدِ واقعی: {int(r['Maturity_days'])} روزِ تقویمی | نمادِ اختیار: {r['Option_Symbol']} | "
+          f"Strike: {r['Strike']:,.0f} تومان")
+    print(f"  → پرمیومِ واقعیِ بازار: {r['Premium']:,.0f} تومان | احتمالِ اعمال: {r['P_assignment']:.1%}")
+    print(f"  → بازدهِ موردِانتظارِ سالانه‌شده: {r['Annualized_Expected_Return']:.1%}")
+
+
 # ## ۹) محدودیت‌ها و صداقتِ علمی
 # 
 # - **این یک شبکه‌ی فرضیِ اختیارهاست، نه قیمت‌های واقعیِ بازار** — چون دسترسیِ
@@ -373,10 +487,12 @@ for name in ASSET_NAMES:
 
 # ## ۱۰) ذخیره‌ی خروجی
 
-# In[10]:
+# In[12]:
 
 
 grid_df.to_csv(DATA_DIR + 'covered_call_option_grid.csv', index=False)
 final_df.reset_index().to_csv(DATA_DIR + 'covered_call_final_recommendations.csv', index=False)
-print("✅ ذخیره شد: covered_call_option_grid.csv, covered_call_final_recommendations.csv")
+real_best_df.reset_index().to_csv(DATA_DIR + 'real_covered_call_final_recommendations.csv', index=False)
+print("✅ ذخیره شد: covered_call_option_grid.csv, covered_call_final_recommendations.csv, "
+      "real_covered_call_final_recommendations.csv")
 
